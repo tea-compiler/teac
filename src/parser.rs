@@ -208,7 +208,7 @@ fn parse_type_spec(pair: Pair) -> ParseResult<Rc<Option<ast::TypeSpecifier>>> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::kw_i32 => {
-                return Ok(Rc::new(Some(ast::TypeSepcifier {
+                return Ok(Rc::new(Some(ast::TypeSpecifier {
                     pos,
                     inner: ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Int),
                 })));
