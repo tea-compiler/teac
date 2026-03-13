@@ -76,7 +76,6 @@ double_colon = { "::" }
 // Example: "&[i32]" in function parameters
 ampersand = { "&" }
 
-// Literals and identifiers
 // Numeric literal: zero or a non-zero digit followed by any digits
 // Examples: "0", "1", "10", "48", "57", "1005"
 num = @{
@@ -109,7 +108,7 @@ kw_i32 = @{ "i32" ~ &(WHITESPACE | semicolon | comma | rparen | lbrace | rbrace 
 kw_use = @{ "use" ~ WHITESPACE }
 
 // Identifier: starts with letter or underscore, followed by letters, digits, or underscores
-// Cannot be a keyword (enforced by negative lookaheads)
+// Cannot be a keyword: this step is performed after the keyword is recognized.
 // Examples: "x", "count", "my_getint", "quickread", "arr", "head", "tail", "inq"
 identifier = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | ASCII_DIGIT | "_")*
