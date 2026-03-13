@@ -84,38 +84,36 @@ num = @{
     | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)
 }
 
+// Keywords (using @ for atomic rules to prevent whitespace inside)
+// Example: "let x:i32 = 0;"
+kw_let = @{ "let" ~ WHITESPACE }
+// Example: "fn main() -> i32 { }"
+kw_fn = @{ "fn" ~ WHITESPACE }
+// Example: "struct Node { value:i32, next:i32 }"
+kw_struct = @{ "struct" ~ WHITESPACE }
+// Example: "if x > 0 { }"
+kw_if = @{ "if" ~ WHITESPACE }
+// Example: "if x > 0 { } else { }"
+kw_else = @{ "else" ~ &(WHITESPACE | lbrace) }
+// Example: "while i < 10 { i = i + 1; }"
+kw_while = @{ "while" ~ WHITESPACE }
+// Example: "while 1 > 0 { if done { break; } }"
+kw_break = @{ "break" ~ &(WHITESPACE | semicolon) }
+// Example: "while i < n { if inq[temp] == 0 { continue; } i = i + 1; }"
+kw_continue = @{ "continue" ~ &(WHITESPACE | semicolon) }
+// Example: "return 0;" or "return sum;"
+kw_return = @{ "return" ~ &(WHITESPACE | semicolon) }
+// Example: "let count:i32 = 0;"
+kw_i32 = @{ "i32" ~ &(WHITESPACE | semicolon | comma | rparen | lbrace | rbrace | rbracket | op_assign) }
+// Example: "use std;"
+kw_use = @{ "use" ~ WHITESPACE }
+
 // Identifier: starts with letter or underscore, followed by letters, digits, or underscores
 // Cannot be a keyword (enforced by negative lookaheads)
 // Examples: "x", "count", "my_getint", "quickread", "arr", "head", "tail", "inq"
 identifier = @{
-    !kw_let ~ !kw_fn ~ !kw_struct ~ !kw_if ~ !kw_else ~ !kw_while ~ 
-    !kw_break ~ !kw_continue ~ !kw_return ~ !kw_i32 ~ !kw_use ~
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | ASCII_DIGIT | "_")*
 }
-
-// Keywords (using @ for atomic rules to prevent whitespace inside)
-// Example: "let x:i32 = 0;"
-kw_let = @{ "let" }
-// Example: "fn main() -> i32 { }"
-kw_fn = @{ "fn" }
-// Example: "struct Node { value:i32, next:i32 }"
-kw_struct = @{ "struct" }
-// Example: "if x > 0 { }"
-kw_if = @{ "if" }
-// Example: "if x > 0 { } else { }"
-kw_else = @{ "else" }
-// Example: "while i < 10 { i = i + 1; }"
-kw_while = @{ "while" }
-// Example: "while 1 > 0 { if done { break; } }"
-kw_break = @{ "break" }
-// Example: "while i < n { if inq[temp] == 0 { continue; } i = i + 1; }"
-kw_continue = @{ "continue" }
-// Example: "return 0;" or "return sum;"
-kw_return = @{ "return" }
-// Example: "let count:i32 = 0;"
-kw_i32 = @{ "i32" }
-// Example: "use std;"
-kw_use = @{ "use" }
 
 // Types
 // Type specification: integer type or user-defined type
