@@ -2,11 +2,10 @@
 
 ## Overview
 
-TeaLang is a statically-typed programming language with syntax inspired by Rust. Each program consists of optional module imports, variable declarations, structure definitions, and function declarations/definitions.
+TeaLang is a statically-typed programming language with syntax inspired by Rust. Each program consists of `use` statements, variable declarations, structure definitions, and function declarations/definitions, which can appear in any order.
 
 ```
-program := useStmt* programElement*
-programElement := varDeclStmt | structDef | fnDeclStmt | fnDef
+program := (useStmt | varDeclStmt | structDef | fnDeclStmt | fnDef)*
 ```
 
 ---
@@ -56,15 +55,18 @@ Spaces, tabs, newlines, and carriage returns are automatically skipped between t
 
 ### Use Statement
 
-Import external modules (typically the standard library) using the `use` keyword.
+Import external modules using the `use` keyword. Module paths support multiple levels separated by `::`. `use` statements may appear anywhere at the top level, interleaved with other declarations.
 
 ```
-useStmt := < use > identifier < ; >
+modulePath := identifier (< :: > identifier)*
+
+useStmt := < use > modulePath < ; >
 ```
 
-Example:
+Examples:
 ```rust
-use std;
+use std;               // single-level module
+use a::b::c;           // multi-level module path
 ```
 
 ---
@@ -83,52 +85,68 @@ Examples: `i32`, `Node`, `Queue`
 
 ### Variable Declarations
 
-Variables can be declared with or without type annotations, and can be scalars, arrays, or slice references.
+Variable declarations are categorized into five distinct forms. Note that `slice_decl` is only valid as a function parameter — it cannot be used directly in a `let` statement.
 
 ```
-varDecl := identifier < : > < & > < [ > typeSpec < ] >                           // slice type (reference)
-         | identifier < : > < [ > typeSpec < ; > num < ] >                        // array with size
-         | identifier < : > typeSpec                                              // scalar with type
-         | identifier < [ > num < ] >                                             // array without type
-         | identifier                                                             // scalar without type
+scalar_decl       := identifier                                             // scalar without type
+typed_scalar_decl := identifier < : > typeSpec                             // scalar with type
+array_decl        := identifier < [ > num < ] >                            // array without type
+typed_array_decl  := identifier < : > < [ > typeSpec < ; > num < ] >       // array with type and size
+slice_decl        := identifier < : > < & > < [ > typeSpec < ] >           // slice reference (parameter only)
 ```
+
+```
+varDecl := typed_scalar_decl
+         | scalar_decl
+         | typed_array_decl
+         | array_decl
+```
+
+> **Note:** `slice_decl` is only permitted in function parameter lists (`paramDecl`), not in `let` declarations.
 
 Examples:
 ```rust
-n:i32                    // scalar integer
-arr: [i32; 100]         // array of 100 integers
-input: &[i32]           // slice reference (pointer to array)
-que[1005]               // array without explicit type
-count                   // scalar without type
+n:i32                    // typed_scalar_decl
+count                    // scalar_decl
+arr: [i32; 100]         // typed_array_decl
+que[1005]               // array_decl
 ```
 
 ### Variable Declaration Statements
 
-Declare variables with the `let` keyword, optionally initializing them.
+Declare variables with the `let` keyword, optionally initializing them. Array initializers support two forms: an explicit element list `[v1, v2, ...]` and a fill syntax `[val; n]` meaning `n` copies of `val`.
 
 ```
 varDeclStmt := < let > varDef < ; >
              | < let > varDecl < ; >
 
-varDef := identifier < : > < [ > typeSpec < ; > num < ] > < = > < { > rightValList < } >  // array with initializer
-        | identifier < : > typeSpec < = > rightVal                                         // scalar with initializer
-        | identifier < [ > num < ] > < = > < { > rightValList < } >                        // array without type, with initializer
-        | identifier < = > rightVal                                                        // scalar without type, with initializer
+varDef := typed_array_decl  < = > arrayInitializer   // typed array with initializer
+        | typed_scalar_decl < = > rightVal            // typed scalar with initializer
+        | array_decl        < = > arrayInitializer    // untyped array with initializer
+        | scalar_decl       < = > rightVal            // scalar with initializer (type inferred)
+
+arrayInitializer := < [ > rightValList < ] >          // explicit list: [1, 2, 3]
+                  | < [ > rightVal < ; > num < ] >    // fill syntax:   [0; 5] means five 0s
 ```
+
+> **Note:** `slice_decl` cannot appear in `let` statements.
 
 Examples:
 ```rust
-let n:i32;                          // declare integer
-let x:i32 = 0;                      // declare and initialize
-let arr: [i32; 3] = {1, 2, 3};     // declare and initialize array
-let count = 0;                      // type inference
+let n:i32;                              // declare typed scalar
+let x:i32 = 0;                          // declare and initialize typed scalar
+let arr: [i32; 3] = [1, 2, 3];         // declare and initialize typed array (explicit list)
+let buf: [i32; 5] = [0; 5];            // declare and initialize typed array (fill syntax)
+let que[3] = [1, 2, 3];               // declare and initialize untyped array (explicit list)
+let que[5] = [0; 5];                  // declare and initialize untyped array (fill syntax)
+let count = 0;                          // type inference scalar
 ```
 
 ---
 
 ## Structure Definitions
 
-Define custom types using the `struct` keyword with named fields.
+Define custom types using the `struct` keyword with named fields. Struct fields use `varDecl` (scalars and arrays only; slices are not permitted as struct fields).
 
 ```
 structDef := < struct > identifier < { > varDeclList < } >
@@ -149,20 +167,22 @@ struct Node {
 
 ### Function Declarations
 
-Declare function signatures with optional return types.
+Declare function signatures with optional return types. Function parameters may include `slice_decl` to accept array references.
 
 ```
-fnDeclStmt := fnDecl < ; >
+nfnDeclStmt := fnDecl < ; >
 fnDecl := < fn > identifier < ( > paramDecl? < ) > < -> > typeSpec  // with return type
         | < fn > identifier < ( > paramDecl? < ) >                   // without return type
-paramDecl := varDeclList
+paramDecl := paramItem (< , > paramItem)*
+paramItem := slice_decl | varDecl
 ```
 
 Examples:
 ```rust
-fn quickread() -> i32;              // declaration with return type
-fn move(x:i32, y:i32);             // declaration without return type
-fn init();                          // no parameters
+fn quickread() -> i32;                      // declaration with return type
+fn move(x:i32, y:i32);                     // declaration without return type
+fn init();                                  // no parameters
+fn sum(arr: &[i32], n:i32) -> i32;         // slice parameter for array passing
 ```
 
 ### Function Definitions
@@ -179,6 +199,14 @@ fn add(x:i32, y:i32) -> i32 {
     return x + y;
 }
 
+fn fill(arr: &[i32], n:i32) {
+    let i:i32 = 0;
+    while i < n {
+        arr[i] = i;
+        i = i + 1;
+    }
+}
+
 fn main() -> i32 {
     let result:i32 = add(5, 3);
     return result;
@@ -187,19 +215,25 @@ fn main() -> i32 {
 
 ### Function Calls
 
-Functions can be called with module prefixes (for external functions) or locally.
+Functions can be called with module prefixes (for external functions) or locally. Array arguments are passed by reference using `&identifier`. Module prefixes support multiple levels.
 
 ```
 fnCall := modulePrefixedCall | localCall
-modulePrefixedCall := identifier < :: > identifier < ( > rightValList? < ) >
-localCall := identifier < ( > rightValList? < ) >
+modulePrefixedCall := modulePath < :: > identifier < ( > argList? < ) >
+localCall := identifier < ( > argList? < ) >
+
+argList  := arg (< , > arg)*
+arg      := < & > identifier                                        // pass array by reference
+          | rightVal                                                // pass scalar / expression by value
 ```
 
 Examples:
 ```rust
-std::getint()               // standard library function
+std::getint()               // single-level module prefix
+a::b::getint()              // multi-level module prefix
 quickread()                 // local function
-addedge(x, y)              // local function with arguments
+addedge(x, y)              // local function with scalar arguments
+fill(&arr, n)              // pass array by reference
 std::putch(10)             // standard library with argument
 ```
 
@@ -256,6 +290,7 @@ Examples:
 init();
 std::putch(10);
 addedge(x, y);
+fill(&arr, n);
 ```
 
 ### Return Statement
@@ -477,12 +512,12 @@ i != -1
 
 ### Other Operators
 
-| Operator | Description          | Example           |
-|----------|----------------------|-------------------|
-| `=`      | Assignment           | `x = 5;`          |
-| `->`     | Function return type | `fn main() -> i32`|
-| `::`     | Module separator     | `std::getint()`   |
-| `&`      | Reference            | `&[i32]`          |
+| Operator | Description          | Example              |
+|----------|----------------------|----------------------|
+| `=`      | Assignment           | `x = 5;`             |
+| `->`     | Function return type | `fn main() -> i32`   |
+| `::`     | Module separator     | `std::getint()`      |
+| `&`      | Reference / address-of | `fill(&arr, n)`    |
 
 ---
 
@@ -512,18 +547,27 @@ fn add_node(val:i32) {
     count = count + 1;
 }
 
-fn main() -> i32 {
-    init();
-    
-    let n:i32 = std::getint();
+fn fill(arr: &[i32], n:i32) {
     let i:i32 = 0;
-    
     while i < n {
-        let val:i32 = std::getint();
-        add_node(val);
+        arr[i] = std::getint();
         i = i + 1;
     }
-    
+}
+
+fn main() -> i32 {
+    init();
+
+    let n:i32 = std::getint();
+    let buf: [i32; 100];
+    fill(&buf, n);
+
+    let i:i32 = 0;
+    while i < n {
+        add_node(buf[i]);
+        i = i + 1;
+    }
+
     return 0;
 }
 ```
@@ -532,10 +576,20 @@ fn main() -> i32 {
 
 ## Notes
 
-1. **Type Annotations**: Type annotations are optional in many contexts but recommended for clarity.
-2. **Array Syntax**: Arrays use Rust-style syntax: `[type; size]`.
-3. **Slice References**: Use `&[type]` to pass arrays to functions by reference.
-4. **Module System**: Currently only supports importing the `std` module.
-5. **No Implicit Conversions**: All type conversions must be explicit.
-6. **Operator Precedence**: Standard mathematical precedence applies (multiplication/division before addition/subtraction).
-7. **Chained Access**: Array indexing and member access can be chained: `arr[i].field[j]`.
+1. **Top-level Order**: `use` statements, variable declarations, struct definitions, and function declarations/definitions may appear in any order at the top level.
+2. **Type Annotations**: Type annotations are optional for scalars and arrays in `let` statements but recommended for clarity.
+3. **Array Initializers**: Two forms are supported:
+   - `[val1, val2, ...]` — explicit element list (e.g., `[1, 2, 3]`)
+   - `[val; n]` — fill syntax, equivalent to `n` copies of `val` (e.g., `[0; 5]` means five zeros)
+4. **Slice References (`slice_decl`)**: `slice_decl` (`name: &[type]`) is only valid as a function parameter. It cannot appear in `let` statements or struct fields.
+5. **Passing Arrays by Reference**: Use `&identifier` at the call site to pass an array by reference: `fill(&arr, n)`. The corresponding parameter must be declared as a `slice_decl`.
+6. **Variable Declaration Forms**:
+   - `scalar_decl` — `name` (no type)
+   - `typed_scalar_decl` — `name: type`
+   - `array_decl` — `name[size]` (no type)
+   - `typed_array_decl` — `name: [type; size]`
+   - `slice_decl` — `name: &[type]` (parameter only)
+7. **Module System**: Module paths support multiple levels separated by `::` (e.g., `use a::b::c;`). Functions from external modules are called using the full module path as prefix (e.g., `a::b::fn_name(...)`).
+8. **No Implicit Conversions**: All type conversions must be explicit.
+9. **Operator Precedence**: Standard mathematical precedence applies (multiplication/division before addition/subtraction).
+10. **Chained Access**: Array indexing and member access can be chained: `arr[i].field[j]`.
