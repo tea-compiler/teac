@@ -170,8 +170,8 @@ struct Node {
 Declare function signatures with optional return types. Function parameters may include `slice_decl` to accept array references.
 
 ```
-nfnDeclStmt := fnDecl < ; >
-fnDecl := < fn > identifier < ( > paramDecl? < ) > < -> > typeSpec  // with return type
+fnDeclStmt := fnDecl < ; >
+fnDecl := < fn > identifier < ( > paramDecl? < ) > < -> > typeSpec   // with return type
         | < fn > identifier < ( > paramDecl? < ) >                   // without return type
 paramDecl := paramItem (< , > paramItem)*
 paramItem := slice_decl | varDecl
