@@ -604,3 +604,5 @@ fn main() -> i32 {
 8. **No Implicit Conversions**: All type conversions must be explicit.
 9. **Operator Precedence**: Standard mathematical precedence applies (multiplication/division before addition/subtraction).
 10. **Chained Access**: Array indexing and member access can be chained: `arr[i].field[j]`.
+11. **Index Expressions**: Array indices accept only numeric literals or plain identifiers — not arbitrary arithmetic. To use a computed index, store it in a variable first: `let idx:i32 = i + 1; arr[idx] = val;`.
+12. **Negation**: Only numeric literals can be directly negated (`-1`, `-42`). To negate a variable or expression, use subtraction from zero: `0 - x`.
