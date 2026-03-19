@@ -23,8 +23,8 @@ pub use stmt::{
 };
 
 pub use decl::{
-    FnDecl, FnDeclStmt, FnDef, ParamDecl, StructDef, VarDecl, VarDeclArray, VarDeclInner,
-    VarDeclStmt, VarDeclStmtInner, VarDef, VarDefArray, VarDefInner, VarDefScalar,
+    ArrayInitializer, FnDecl, FnDeclStmt, FnDef, ParamDecl, StructDef, VarDecl, VarDeclArray,
+    VarDeclInner, VarDeclStmt, VarDeclStmtInner, VarDef, VarDefArray, VarDefInner, VarDefScalar,
 };
 
 pub use program::{Program, ProgramElement, ProgramElementInner, UseStmt};

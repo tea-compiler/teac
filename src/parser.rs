@@ -322,13 +322,12 @@ fn parse_var_def(pair: Pair) -> ParseResult<Box<ast::VarDef>> {
 
     let identifier = inner_pairs[0].as_str().to_string();
 
-    // Determine pattern based on structure
-    // Look for lbracket to detect array
-    let has_bracket = inner_pairs.iter().any(|p| p.as_rule() == Rule::lbracket);
+    let has_initializer = inner_pairs
+        .iter()
+        .any(|p| p.as_rule() == Rule::array_initializer);
     let has_colon = inner_pairs.iter().any(|p| p.as_rule() == Rule::colon);
 
-    if has_bracket {
-        // Array definition
+    if has_initializer {
         let len = parse_num(
             inner_pairs
                 .iter()
@@ -349,21 +348,23 @@ fn parse_var_def(pair: Pair) -> ParseResult<Box<ast::VarDef>> {
             Rc::new(None)
         };
 
-        let vals = parse_right_val_list(
+        let initializer = parse_array_initializer(
             inner_pairs
                 .iter()
-                .find(|p| p.as_rule() == Rule::right_val_list)
-                .ok_or_else(|| grammar_error("var_def.vals", &pair_for_error))?
+                .find(|p| p.as_rule() == Rule::array_initializer)
+                .ok_or_else(|| grammar_error("var_def.array_init", &pair_for_error))?
                 .clone(),
         )?;
 
         Ok(Box::new(ast::VarDef {
             identifier,
             type_specifier,
-            inner: ast::VarDefInner::Array(Box::new(ast::VarDefArray { len, vals })),
+            inner: ast::VarDefInner::Array(Box::new(ast::VarDefArray {
+                len,
+                initializer,
+            })),
         }))
     } else {
-        // Scalar definition
         let type_specifier = if has_colon {
             parse_type_spec(
                 inner_pairs
@@ -390,6 +391,30 @@ fn parse_var_def(pair: Pair) -> ParseResult<Box<ast::VarDef>> {
             inner: ast::VarDefInner::Scalar(Box::new(ast::VarDefScalar { val })),
         }))
     }
+}
+
+fn parse_array_initializer(pair: Pair) -> ParseResult<ast::ArrayInitializer> {
+    let pair_for_error = pair.clone();
+    let children: Vec<_> = pair.into_inner().collect();
+
+    if let Some(list_pair) = children.iter().find(|p| p.as_rule() == Rule::right_val_list) {
+        let vals = parse_right_val_list(list_pair.clone())?;
+        return Ok(ast::ArrayInitializer::ExplicitList(vals));
+    }
+
+    let val_pair = children
+        .iter()
+        .find(|p| p.as_rule() == Rule::right_val)
+        .ok_or_else(|| grammar_error("array_initializer.val", &pair_for_error))?;
+    let count_pair = children
+        .iter()
+        .find(|p| p.as_rule() == Rule::num)
+        .ok_or_else(|| grammar_error("array_initializer.count", &pair_for_error))?;
+
+    let val = parse_right_val(val_pair.clone())?;
+    let count = parse_num(count_pair.clone())? as usize;
+
+    Ok(ast::ArrayInitializer::Fill { val, count })
 }
 
 fn parse_right_val_list(pair: Pair) -> ParseResult<Vec<ast::RightVal>> {

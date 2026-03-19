@@ -176,12 +176,19 @@ var_decl_stmt = {
     | kw_let ~ var_decl ~ semicolon
 }
 
+// Array initializer: explicit list [1, 2, 3] or fill syntax [0; 5]
+// Examples: "[1, 2, 3]", "[0; 5]"
+array_initializer = {
+    lbracket ~ right_val ~ semicolon ~ num ~ rbracket       // fill syntax: [0; 5] means five 0s
+    | lbracket ~ right_val_list ~ rbracket                   // explicit list: [1, 2, 3]
+}
+
 // Variable definition with initialization
-// Examples: "let x:i32 = 0;", "let arr: [i32; 3] = {1, 2, 3};"
+// Examples: "let x:i32 = 0;", "let arr: [i32; 3] = [1, 2, 3];"
 var_def = {
-    identifier ~ colon ~ lbracket ~ type_spec ~ semicolon ~ num ~ rbracket ~ op_assign ~ lbrace ~ right_val_list ~ rbrace  // array with type (Rust style)
+    identifier ~ colon ~ lbracket ~ type_spec ~ semicolon ~ num ~ rbracket ~ op_assign ~ array_initializer  // array with type
     | identifier ~ colon ~ type_spec ~ op_assign ~ right_val  // scalar with type
-    | identifier ~ lbracket ~ num ~ rbracket ~ op_assign ~ lbrace ~ right_val_list ~ rbrace  // array without type
+    | identifier ~ lbracket ~ num ~ rbracket ~ op_assign ~ array_initializer  // array without type
     | identifier ~ op_assign ~ right_val  // scalar without type
 }
 

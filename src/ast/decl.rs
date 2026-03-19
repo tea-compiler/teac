@@ -29,9 +29,15 @@ pub struct VarDefScalar {
 }
 
 #[derive(Debug, Clone)]
+pub enum ArrayInitializer {
+    ExplicitList(RightValList),
+    Fill { val: Box<RightVal>, count: usize },
+}
+
+#[derive(Debug, Clone)]
 pub struct VarDefArray {
     pub len: usize,
-    pub vals: RightValList,
+    pub initializer: ArrayInitializer,
 }
 
 #[derive(Debug, Clone)]

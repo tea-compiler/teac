@@ -204,7 +204,14 @@ impl DisplayAsTree for VarDef {
         let prefix = tree_indent(indent_levels, is_last);
         match &self.inner {
             VarDefInner::Scalar(s) => writeln!(f, "{}{} = {}", prefix, self.identifier, s.val),
-            VarDefInner::Array(a) => writeln!(f, "{}{} = {:?}", prefix, self.identifier, a.vals),
+            VarDefInner::Array(a) => match &a.initializer {
+                ArrayInitializer::ExplicitList(vals) => {
+                    writeln!(f, "{}{} = {:?}", prefix, self.identifier, vals)
+                }
+                ArrayInitializer::Fill { val, count } => {
+                    writeln!(f, "{}{} = [{}; {}]", prefix, self.identifier, val, count)
+                }
+            },
         }
     }
 }

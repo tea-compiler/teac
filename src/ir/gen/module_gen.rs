@@ -234,11 +234,16 @@ impl<'a> IrGenerator<'a> {
         let dtype = Dtype::try_from(stmt)?;
         let initializers = if let ast::VarDeclStmtInner::Def(d) = &stmt.inner {
             Some(match &d.inner {
-                ast::VarDefInner::Array(def) => def
-                    .vals
-                    .iter()
-                    .map(Self::handle_right_val_static)
-                    .collect::<Result<Vec<_>, _>>()?,
+                ast::VarDefInner::Array(def) => match &def.initializer {
+                    ast::ArrayInitializer::ExplicitList(vals) => vals
+                        .iter()
+                        .map(Self::handle_right_val_static)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    ast::ArrayInitializer::Fill { val, count } => {
+                        let v = Self::handle_right_val_static(val)?;
+                        vec![v; *count]
+                    }
+                },
                 ast::VarDefInner::Scalar(scalar) => {
                     let value = Self::handle_right_val_static(&scalar.val)?;
                     vec![value]

@@ -1,4 +1,4 @@
-use crate::ast::{self, AssignmentStmt, RightValList};
+use crate::ast::{self, ArrayInitializer, AssignmentStmt, RightValList};
 use crate::ir::function::{BlockLabel, FunctionGenerator};
 use crate::ir::stmt::{ArithBinOp, CmpPredicate, StmtInner};
 use crate::ir::types::Dtype;
@@ -221,6 +221,29 @@ impl<'ir> FunctionGenerator<'ir> {
         Ok(())
     }
 
+    pub fn init_array_from(
+        &mut self,
+        base_ptr: Operand,
+        initializer: &ArrayInitializer,
+    ) -> Result<(), Error> {
+        match initializer {
+            ArrayInitializer::ExplicitList(vals) => self.init_array(base_ptr, vals),
+            ArrayInitializer::Fill { val, count } => {
+                let fill_val = self.handle_right_val(val)?;
+                for i in 0..*count {
+                    let element_ptr = self.alloc_temporary(Dtype::ptr_to(Dtype::I32));
+                    self.emit_gep(
+                        element_ptr.clone(),
+                        base_ptr.clone(),
+                        Operand::from(i as i32),
+                    );
+                    self.emit_store(fill_val.clone(), element_ptr);
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn handle_local_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
         let identifier = def.identifier.as_str();
         let dtype = def.type_specifier.as_ref().as_ref().map(Dtype::from);
@@ -240,7 +263,7 @@ impl<'ir> FunctionGenerator<'ir> {
             ast::VarDefInner::Array(array) => {
                 let pointee = Self::plan_local_array_def_storage(&dtype, array.len)?;
                 let local = self.allocate_pointer_local(identifier, pointee);
-                self.init_array(Operand::from(local.clone()), &array.vals)?;
+                self.init_array_from(Operand::from(local.clone()), &array.initializer)?;
                 local
             }
         };
