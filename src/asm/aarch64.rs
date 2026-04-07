@@ -78,6 +78,12 @@ impl<'a> Generator for AArch64AsmGenerator<'a> {
 
         self.functions.clear();
         for func in self.module.function_list.values() {
+            // Skip external declarations (blocks == None); they are provided by
+            // the linked object file (e.g. std.o) and must not be emitted as
+            // assembly symbols, otherwise the linker will report duplicate definitions.
+            if func.blocks.is_none() {
+                continue;
+            }
             self.functions
                 .push(Self::handle_function(&layouts, func, self.target)?);
         }

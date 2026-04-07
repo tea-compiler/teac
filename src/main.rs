@@ -11,7 +11,7 @@ use common::{Generator, Target};
 use std::{
     fs::{self, File},
     io::{self, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, ValueEnum)]
@@ -79,7 +79,15 @@ fn run() -> Result<()> {
         .program
         .as_ref()
         .context("internal parser state missing AST after parse")?;
-    let mut ir_gen = ir::IrGenerator::new(ast);
+    let input_path = Path::new(&cli.input);
+    // `Path::parent()` returns `Some("")` for a bare filename (e.g. "main.tea"),
+    // not `None`, so we filter the empty case and fall back to the current directory.
+    let source_dir = input_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut ir_gen = ir::IrGenerator::new(ast, source_dir);
     ir_gen.generate().context("failed to generate IR")?;
 
     let pass_manager = opt::FunctionPassManager::with_default_pipeline();

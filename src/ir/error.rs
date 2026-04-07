@@ -1,10 +1,23 @@
 use crate::ast;
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Initialization of structs not supported")]
     StructInitialization,
+
+    #[error("Module '{module_name}' not found: expected header file at '{}'", path.display())]
+    ModuleNotFound {
+        module_name: String,
+        path: PathBuf,
+    },
+
+    #[error("Failed to parse module '{module_name}': {message}")]
+    ModuleParseError {
+        module_name: String,
+        message: String,
+    },
 
     #[error("Division by zero in constant expression")]
     DivisionByZero,
