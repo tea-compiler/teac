@@ -1,10 +1,31 @@
+//! Tree pretty-printer for the AST.
+//!
+//! This module defines the [`DisplayAsTree`] trait and provides implementations
+//! for every AST node type.  When a node is printed with this trait it
+//! produces an indented, Unicode-box-drawing tree that mirrors the logical
+//! structure of the AST, making it easy to read program structure at a glance.
+//!
+//! The indentation state is passed down through the `indent_levels` slice.
+//! Each element records whether the corresponding ancestor was the *last*
+//! child at its level; this drives the choice between `│  ` (more siblings
+//! follow) and `   ` (no more siblings) connector strings.
+
 use super::decl::*;
 use super::expr::*;
 use super::program::*;
 use super::stmt::*;
 use std::fmt::{Error, Formatter};
 
+/// Trait for formatting an AST node as an indented tree.
 pub trait DisplayAsTree {
+    /// Write this node (and all its children) to `f` as an indented tree.
+    ///
+    /// * `indent_levels` – a slice whose length equals the current nesting
+    ///   depth; each `bool` records whether the corresponding ancestor was
+    ///   the last child at its level (`true` → last, so print spaces instead
+    ///   of a vertical bar).
+    /// * `is_last` – whether *this* node is the last sibling among its
+    ///   parent's children.
     fn fmt_tree(
         &self,
         f: &mut Formatter<'_>,
@@ -12,28 +33,42 @@ pub trait DisplayAsTree {
         is_last: bool,
     ) -> Result<(), Error>;
 
+    /// Convenience method that starts a fresh tree with no indentation.
+    /// Equivalent to calling `fmt_tree(f, &[], true)`.
     fn fmt_tree_root(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         self.fmt_tree(f, &[], true)
     }
 }
 
+/// Builds the indentation prefix string for a tree node.
+///
+/// For each ancestor level, appends either `"   "` (if that ancestor was the
+/// last child, so no vertical bar is needed) or `"│  "` (if more siblings
+/// follow at that level).  Finally appends `"└─"` for the last child or
+/// `"├─"` for any other child.
 fn tree_indent(indent_levels: &[bool], is_last: bool) -> String {
     let mut s = String::new();
     for &last in indent_levels.iter() {
         if last {
+            // Ancestor was the last child — no vertical connector needed.
             s.push_str("   ");
         } else {
+            // More siblings exist at this ancestor level — draw vertical bar.
             s.push_str("│  ");
         }
     }
     if is_last {
+        // This node is the last child — use a corner connector.
         s.push_str("└─");
     } else {
+        // More siblings follow — use a tee connector.
         s.push_str("├─");
     }
     s
 }
 
+/// Formats the root `Program` node, listing every top-level element as a
+/// child in the tree.
 impl DisplayAsTree for Program {
     fn fmt_tree(
         &self,
@@ -42,6 +77,7 @@ impl DisplayAsTree for Program {
         is_last: bool,
     ) -> Result<(), Error> {
         writeln!(f, "{}Program", tree_indent(indent_levels, is_last))?;
+        // Build the indentation context for children.
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(!is_last);
         let last_index = self.elements.len().saturating_sub(1);
@@ -52,6 +88,7 @@ impl DisplayAsTree for Program {
     }
 }
 
+/// Delegates formatting to the concrete element variant.
 impl DisplayAsTree for ProgramElement {
     fn fmt_tree(
         &self,
@@ -68,6 +105,7 @@ impl DisplayAsTree for ProgramElement {
     }
 }
 
+/// Prints a `VarDeclStmt` header then delegates to the inner decl/def.
 impl DisplayAsTree for VarDeclStmt {
     fn fmt_tree(
         &self,
@@ -76,10 +114,13 @@ impl DisplayAsTree for VarDeclStmt {
         is_last: bool,
     ) -> Result<(), Error> {
         writeln!(f, "{}VarDeclStmt", tree_indent(indent_levels, is_last))?;
+        // The inner node is always the single (last) child.
         self.inner.fmt_tree(f, indent_levels, true)
     }
 }
 
+/// Delegates to either the `Decl` or `Def` variant of a variable
+/// declaration statement.
 impl DisplayAsTree for VarDeclStmtInner {
     fn fmt_tree(
         &self,
@@ -94,6 +135,8 @@ impl DisplayAsTree for VarDeclStmtInner {
     }
 }
 
+/// Prints a single variable declaration as `<name>: <type>`, using
+/// `"unknown"` when no type annotation is present.
 impl DisplayAsTree for VarDecl {
     fn fmt_tree(
         &self,
@@ -101,6 +144,7 @@ impl DisplayAsTree for VarDecl {
         indent_levels: &[bool],
         is_last: bool,
     ) -> Result<(), Error> {
+        // Render the type specifier, falling back to "unknown" if absent.
         let type_str = self
             .type_specifier
             .as_ref()
@@ -115,6 +159,8 @@ impl DisplayAsTree for VarDecl {
     }
 }
 
+/// Transparent forwarding implementation: delegates directly to the
+/// pointed-to value so that `Box<T>` nodes behave identically to `T`.
 impl<T: DisplayAsTree + ?Sized> DisplayAsTree for Box<T> {
     fn fmt_tree(
         &self,
@@ -126,6 +172,8 @@ impl<T: DisplayAsTree + ?Sized> DisplayAsTree for Box<T> {
     }
 }
 
+/// Skips rendering entirely when the `Option` is `None`; otherwise
+/// delegates to the inner boxed value.
 impl<T: DisplayAsTree + ?Sized> DisplayAsTree for Option<Box<T>> {
     fn fmt_tree(
         &self,
@@ -140,6 +188,9 @@ impl<T: DisplayAsTree + ?Sized> DisplayAsTree for Option<Box<T>> {
         }
     }
 }
+
+/// Prints the function name and, optionally, an indented `Params:` subtree
+/// listing all parameter declarations.
 impl DisplayAsTree for FnDecl {
     fn fmt_tree(
         &self,
@@ -154,6 +205,7 @@ impl DisplayAsTree for FnDecl {
             self.identifier
         )?;
         if let Some(params) = &self.param_decl {
+            // Extend the indentation context for the parameter subtree.
             let mut new_indent = indent_levels.to_vec();
             new_indent.push(!is_last);
             writeln!(f, "{}Params:", tree_indent(&new_indent, false))?;
@@ -163,6 +215,7 @@ impl DisplayAsTree for FnDecl {
     }
 }
 
+/// Delegates directly to the inner `FnDecl`.
 impl DisplayAsTree for FnDeclStmt {
     fn fmt_tree(
         &self,
@@ -174,6 +227,7 @@ impl DisplayAsTree for FnDeclStmt {
     }
 }
 
+/// Prints the function name then lists the body statements as children.
 impl DisplayAsTree for FnDef {
     fn fmt_tree(
         &self,
@@ -193,6 +247,8 @@ impl DisplayAsTree for FnDef {
     }
 }
 
+/// Prints a variable definition as either a scalar assignment
+/// (`name = val`) or an array initializer.
 impl DisplayAsTree for VarDef {
     fn fmt_tree(
         &self,
@@ -205,9 +261,11 @@ impl DisplayAsTree for VarDef {
             VarDefInner::Scalar(s) => writeln!(f, "{}{} = {}", prefix, self.identifier, s.val),
             VarDefInner::Array(a) => match &a.initializer {
                 ArrayInitializer::ExplicitList(vals) => {
+                    // Print the debug representation of all explicit values.
                     writeln!(f, "{}{} = {:?}", prefix, self.identifier, vals)
                 }
                 ArrayInitializer::Fill { val, count } => {
+                    // Print the fill syntax: `name = [val; count]`.
                     writeln!(f, "{}{} = [{}; {}]", prefix, self.identifier, val, count)
                 }
             },
@@ -215,6 +273,7 @@ impl DisplayAsTree for VarDef {
     }
 }
 
+/// Prints a `VarDeclList` header then lists every declaration as a child.
 impl DisplayAsTree for VarDeclList {
     fn fmt_tree(
         &self,
@@ -235,6 +294,8 @@ impl DisplayAsTree for VarDeclList {
     }
 }
 
+/// Prints an `AssignmentStmt` header then shows the lvalue and rvalue as
+/// the two children.
 impl DisplayAsTree for AssignmentStmt {
     fn fmt_tree(
         &self,
@@ -247,11 +308,13 @@ impl DisplayAsTree for AssignmentStmt {
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
 
+        // lvalue is not the last child; rvalue is.
         self.left_val.fmt_tree(f, &new_indent, false)?;
         self.right_val.fmt_tree(f, &new_indent, true)
     }
 }
 
+/// Prints `CallStmt <fn_name>` then lists each argument as a child.
 impl DisplayAsTree for CallStmt {
     fn fmt_tree(
         &self,
@@ -277,6 +340,7 @@ impl DisplayAsTree for CallStmt {
     }
 }
 
+/// Delegates to the concrete statement variant inside a code block.
 impl DisplayAsTree for CodeBlockStmtInner {
     fn fmt_tree(
         &self,
@@ -298,6 +362,7 @@ impl DisplayAsTree for CodeBlockStmtInner {
     }
 }
 
+/// Delegates to the inner statement kind.
 impl DisplayAsTree for CodeBlockStmt {
     fn fmt_tree(
         &self,
@@ -309,6 +374,8 @@ impl DisplayAsTree for CodeBlockStmt {
     }
 }
 
+/// Prints every statement in the list at the same indentation level,
+/// marking only the final element as `is_last`.
 impl DisplayAsTree for CodeBlockStmtList {
     fn fmt_tree(
         &self,
@@ -324,6 +391,8 @@ impl DisplayAsTree for CodeBlockStmtList {
     }
 }
 
+/// Prints `IfStmt Cond: <cond>` then shows the `IfBranch` and optional
+/// `ElseBranch` subtrees.
 impl DisplayAsTree for IfStmt {
     fn fmt_tree(
         &self,
@@ -339,6 +408,8 @@ impl DisplayAsTree for IfStmt {
         )?;
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
+        // Print the then-branch header; it is not the last child when an
+        // else-branch also exists.
         writeln!(f, "{}IfBranch:", tree_indent(&new_indent, false))?;
         self.if_stmts.fmt_tree(f, &new_indent, true)?;
         if let Some(e) = &self.else_stmts {
@@ -349,6 +420,7 @@ impl DisplayAsTree for IfStmt {
     }
 }
 
+/// Prints `WhileStmt Cond: <cond>` then shows the loop `Body` subtree.
 impl DisplayAsTree for WhileStmt {
     fn fmt_tree(
         &self,
@@ -369,6 +441,8 @@ impl DisplayAsTree for WhileStmt {
     }
 }
 
+/// Prints `ReturnStmt <val>` if a value is returned, or just `ReturnStmt`
+/// for a void return.
 impl DisplayAsTree for ReturnStmt {
     fn fmt_tree(
         &self,
@@ -384,6 +458,7 @@ impl DisplayAsTree for ReturnStmt {
     }
 }
 
+/// Prints a leaf `ContinueStmt` node.
 impl DisplayAsTree for ContinueStmt {
     fn fmt_tree(
         &self,
@@ -395,6 +470,7 @@ impl DisplayAsTree for ContinueStmt {
     }
 }
 
+/// Prints a leaf `BreakStmt` node.
 impl DisplayAsTree for BreakStmt {
     fn fmt_tree(
         &self,
@@ -406,6 +482,7 @@ impl DisplayAsTree for BreakStmt {
     }
 }
 
+/// Prints a leaf `NullStmt` node (empty statement).
 impl DisplayAsTree for NullStmt {
     fn fmt_tree(
         &self,
@@ -416,6 +493,9 @@ impl DisplayAsTree for NullStmt {
         writeln!(f, "{}NullStmt", tree_indent(indent_levels, is_last))
     }
 }
+
+/// Prints a `LeftVal` header then its inner variant (identifier, array
+/// access, or member access) as the single child.
 impl DisplayAsTree for LeftVal {
     fn fmt_tree(
         &self,
@@ -435,6 +515,8 @@ impl DisplayAsTree for LeftVal {
     }
 }
 
+/// Prints a `RightVal` header then its inner variant (arithmetic or boolean
+/// expression) as the single child.
 impl DisplayAsTree for RightVal {
     fn fmt_tree(
         &self,
@@ -453,6 +535,7 @@ impl DisplayAsTree for RightVal {
     }
 }
 
+/// Prints `StructDef <name>` then lists field declarations as children.
 impl DisplayAsTree for StructDef {
     fn fmt_tree(
         &self,
@@ -472,6 +555,8 @@ impl DisplayAsTree for StructDef {
     }
 }
 
+/// Prints an `ArrayExpr` header then shows the array lvalue and index
+/// expression as two children.
 impl DisplayAsTree for ArrayExpr {
     fn fmt_tree(
         &self,
@@ -482,11 +567,14 @@ impl DisplayAsTree for ArrayExpr {
         writeln!(f, "{}ArrayExpr", tree_indent(indent_levels, is_last))?;
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
+        // Array lvalue is not the last child; index expression is.
         self.arr.fmt_tree(f, &new_indent, false)?;
         self.idx.fmt_tree(f, &new_indent, true)
     }
 }
 
+/// Prints `MemberExpr <field>` then shows the base struct lvalue as the
+/// single child.
 impl DisplayAsTree for MemberExpr {
     fn fmt_tree(
         &self,
@@ -506,6 +594,8 @@ impl DisplayAsTree for MemberExpr {
     }
 }
 
+/// Prints an `ArithExpr` header then delegates to the concrete inner variant
+/// (binary operation or expression unit).
 impl DisplayAsTree for ArithExpr {
     fn fmt_tree(
         &self,
@@ -523,6 +613,8 @@ impl DisplayAsTree for ArithExpr {
     }
 }
 
+/// Prints a `BoolExpr` header then delegates to the concrete inner variant
+/// (binary boolean operation or boolean unit).
 impl DisplayAsTree for BoolExpr {
     fn fmt_tree(
         &self,
@@ -540,6 +632,8 @@ impl DisplayAsTree for BoolExpr {
     }
 }
 
+/// Prints an index expression as either `IndexExpr Num(<n>)` or
+/// `IndexExpr Id(<name>)`.
 impl DisplayAsTree for IndexExpr {
     fn fmt_tree(
         &self,
@@ -564,6 +658,8 @@ impl DisplayAsTree for IndexExpr {
     }
 }
 
+/// Prints `ArithBiOpExpr <op>` then shows the left and right operands as
+/// two children.
 impl DisplayAsTree for ArithBiOpExpr {
     fn fmt_tree(
         &self,
@@ -579,11 +675,15 @@ impl DisplayAsTree for ArithBiOpExpr {
         )?;
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
+        // Left operand is not the last child; right operand is.
         self.left.fmt_tree(f, &new_indent, false)?;
         self.right.fmt_tree(f, &new_indent, true)
     }
 }
 
+/// Prints an `ExprUnit` header then delegates to the concrete inner variant
+/// (number, identifier, sub-expression, function call, array access, member
+/// access, or reference).
 impl DisplayAsTree for ExprUnit {
     fn fmt_tree(
         &self,
@@ -608,6 +708,8 @@ impl DisplayAsTree for ExprUnit {
     }
 }
 
+/// Prints `BoolBiOpExpr <op>` then shows the left and right operands as
+/// two children.
 impl DisplayAsTree for BoolBiOpExpr {
     fn fmt_tree(
         &self,
@@ -623,11 +725,14 @@ impl DisplayAsTree for BoolBiOpExpr {
         )?;
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
+        // Left operand is not the last child; right operand is.
         self.left.fmt_tree(f, &new_indent, false)?;
         self.right.fmt_tree(f, &new_indent, true)
     }
 }
 
+/// Prints a `BoolUnit` header then delegates to the concrete inner variant
+/// (comparison, nested boolean expression, or unary boolean operation).
 impl DisplayAsTree for BoolUnit {
     fn fmt_tree(
         &self,
@@ -646,6 +751,7 @@ impl DisplayAsTree for BoolUnit {
     }
 }
 
+/// Prints `FnCall: <qualified_name>` then lists each argument as a child.
 impl DisplayAsTree for FnCall {
     fn fmt_tree(
         &self,
@@ -653,6 +759,7 @@ impl DisplayAsTree for FnCall {
         indent_levels: &[bool],
         is_last: bool,
     ) -> Result<(), Error> {
+        // Use the qualified name so that module-prefixed calls are shown correctly.
         let fn_name = self.qualified_name();
         writeln!(
             f,
@@ -672,6 +779,8 @@ impl DisplayAsTree for FnCall {
     }
 }
 
+/// Prints a `ComExpr` header then shows the left and right operands as
+/// two children.
 impl DisplayAsTree for ComExpr {
     fn fmt_tree(
         &self,
@@ -683,11 +792,14 @@ impl DisplayAsTree for ComExpr {
         let mut new_indent = indent_levels.to_vec();
         new_indent.push(is_last);
 
+        // Left operand is not the last child; right operand is.
         self.left.fmt_tree(f, &new_indent, false)?;
         self.right.fmt_tree(f, &new_indent, true)
     }
 }
 
+/// Prints `BoolUOpExpr <op>` then shows the operand condition as the single
+/// child.
 impl DisplayAsTree for BoolUOpExpr {
     fn fmt_tree(
         &self,
