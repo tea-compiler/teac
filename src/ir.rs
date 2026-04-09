@@ -1,3 +1,8 @@
+//! This module defines the compiler's intermediate representation (IR).
+//!
+//! The IR is the central data structure that bridges the front-end (parsing
+//! and type-checking) and the back-end (optimization and code generation).
+
 pub mod error;
 pub mod function;
 mod gen;
