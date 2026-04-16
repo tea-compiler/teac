@@ -16,7 +16,6 @@ pub enum Dtype {
         element: Box<Dtype>,
         length: Option<usize>,
     },
-    Undecided,
 }
 
 impl Dtype {
@@ -49,23 +48,24 @@ impl Display for Dtype {
             Dtype::I1 => write!(f, "i1"),
             Dtype::I32 => write!(f, "i32"),
             Dtype::Void => write!(f, "void"),
-            Dtype::Struct { type_name } => write!(f, "%{}", type_name),
+            Dtype::Struct { type_name } => write!(f, "%{type_name}"),
             Dtype::Pointer { .. } => write!(f, "ptr"),
             Dtype::Array {
                 element,
                 length: Some(length),
-            } => write!(f, "[{} x {}]", length, element.as_ref()),
+            } => write!(f, "[{length} x {}]", element.as_ref()),
             Dtype::Array {
                 element,
                 length: None,
             } => write!(f, "{}", element.as_ref()),
-            Dtype::Undecided => write!(f, "?"),
         }
     }
 }
 
 pub struct StructMember {
-    pub offset: i32,
+    /// Zero-based field index within the enclosing struct.  Emitted as the
+    /// second GEP index when accessing this member.
+    pub index: usize,
     pub dtype: Dtype,
 }
 
@@ -79,41 +79,53 @@ pub struct FunctionType {
     pub arguments: Vec<(String, Dtype)>,
 }
 
-impl PartialEq<ast::FnDecl> for FunctionType {
-    fn eq(&self, rhs: &ast::FnDecl) -> bool {
-        let rhs_dtype = match rhs.return_dtype.as_ref().map(Dtype::from) {
-            Some(dtype) => dtype,
-            None => Dtype::Void,
-        };
+impl TryFrom<&ast::FnDecl> for FunctionType {
+    type Error = crate::ir::Error;
 
-        if self.return_dtype != rhs_dtype {
-            return false;
-        }
+    /// Lowers an AST function declaration into a [`FunctionType`].
+    ///
+    /// Besides the straightforward type conversion, this enforces two
+    /// language rules that the back-end relies on:
+    ///
+    /// 1. Array parameters are rejected with
+    ///    [`crate::ir::Error::ArrayParameterNotAllowed`] — TeaLang requires
+    ///    arrays to be passed by reference (`&[T]`).
+    /// 2. Return types are whitelisted to `void` and `i32`.  Struct returns
+    ///    are grammatically legal but not yet implemented in the AArch64
+    ///    back-end; allowing them here would produce IR that can't be
+    ///    lowered, so they are rejected up-front with
+    ///    [`crate::ir::Error::UnsupportedReturnType`].
+    fn try_from(decl: &ast::FnDecl) -> Result<Self, Self::Error> {
+        let return_dtype = decl
+            .return_dtype
+            .as_ref()
+            .map_or(Dtype::Void, Dtype::from);
 
-        let mut rhs_args = Vec::new();
-        if let Some(params) = &rhs.param_decl {
-            for decl in params.decls.iter() {
-                let identifier = decl.identifier.clone();
-                let dtype = match Dtype::try_from(decl) {
-                    Ok(t) => t,
-                    Err(_) => return false,
-                };
-
-                rhs_args.push((identifier, dtype));
+        match &return_dtype {
+            Dtype::Void | Dtype::I32 => {}
+            _ => {
+                return Err(crate::ir::Error::UnsupportedReturnType {
+                    symbol: decl.identifier.clone(),
+                    dtype: return_dtype,
+                });
             }
         }
 
-        let num_args = self.arguments.len();
-        if rhs_args.len() != num_args {
-            return false;
-        }
-
-        for ((lhs_id, lhs_dtype), (rhs_id, rhs_dtype)) in self.arguments.iter().zip(rhs_args) {
-            if lhs_id != &rhs_id || lhs_dtype != &rhs_dtype {
-                return false;
+        let mut arguments = Vec::new();
+        if let Some(params) = &decl.param_decl {
+            for p in &params.decls {
+                let id = p.identifier.clone();
+                let dtype = Dtype::try_from(p)?;
+                if matches!(&dtype, Dtype::Array { .. }) {
+                    return Err(crate::ir::Error::ArrayParameterNotAllowed { symbol: id });
+                }
+                arguments.push((id, dtype));
             }
         }
 
-        true
+        Ok(Self {
+            return_dtype,
+            arguments,
+        })
     }
 }

@@ -8,21 +8,25 @@
 //! declarations, function definitions, and struct definitions).
 
 use crate::ast;
-use crate::ir::function::{BasicBlock, BlockLabel, Function, FunctionGenerator};
+use crate::ir::function::{
+    BasicBlock, BlockLabel, Function, FunctionBody, FunctionGenerator,
+};
+use crate::ir::gen::type_infer;
 use crate::ir::module::IrGenerator;
 use crate::ir::printer::IrPrinter;
 use crate::ir::stmt::{Stmt, StmtInner};
 use crate::ir::types::{Dtype, FunctionType, StructMember, StructType};
-use crate::ir::value::GlobalVariable;
+use crate::ir::value::GlobalDef;
 use crate::ir::Error;
 
 use crate::common::Generator;
-use crate::ir::value::Named;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
+use std::rc::Rc;
 
 /// Implements the two-phase `Generator` trait for the module-level IR generator.
-impl<'a> Generator for IrGenerator<'a> {
+impl Generator for IrGenerator<'_> {
     type Error = Error;
 
     /// Drive the three-pass IR generation pipeline for the whole program:
@@ -42,56 +46,68 @@ impl<'a> Generator for IrGenerator<'a> {
         let input = self.input;
 
         // Pass 1: handle `use` statements so imported symbols are available.
-        for use_stmt in input.use_stmts.iter() {
+        for use_stmt in &input.use_stmts {
             self.handle_use_stmt(use_stmt)?;
         }
 
         // Pass 2: register all declarations and definitions (signatures only).
-        for elem in input.elements.iter() {
-            use ast::ProgramElementInner::*;
+        for elem in &input.elements {
             match &elem.inner {
-                VarDeclStmt(stmt) => self.handle_global_var_decl(stmt)?,
-                FnDeclStmt(fn_decl) => self.handle_fn_decl(fn_decl)?,
-                FnDef(fn_def) => self.handle_fn_def(fn_def)?,
-                StructDef(struct_def) => self.handle_struct_def(struct_def)?,
+                ast::ProgramElementInner::VarDeclStmt(stmt) => {
+                    self.handle_global_var_decl(stmt)?;
+                }
+                ast::ProgramElementInner::FnDeclStmt(fn_decl) => self.handle_fn_decl(fn_decl)?,
+                ast::ProgramElementInner::FnDef(fn_def) => self.handle_fn_def(fn_def)?,
+                ast::ProgramElementInner::StructDef(struct_def) => {
+                    self.handle_struct_def(struct_def)?;
+                }
             }
         }
 
         // Pass 3: generate IR bodies for every function definition.
-        for elem in input.elements.iter() {
-            use ast::ProgramElementInner::*;
-            if let FnDef(fn_def) = &elem.inner {
+        for elem in &input.elements {
+            if let ast::ProgramElementInner::FnDef(fn_def) = &elem.inner {
+                // Run the type inference pass to resolve all local variable
+                // types before IR generation.  The pass sees the same name
+                // environment as `FunctionGenerator` — struct/function types
+                // from the registry plus the module's global variable list —
+                // so every identifier inside the function body resolves
+                // consistently in both passes.
+                let resolved_types = type_infer::infer_function(
+                    &self.registry,
+                    &self.module.global_list,
+                    fn_def,
+                )?;
+
                 // Use a scoped FunctionGenerator so its temporary state is
                 // dropped before we mutably borrow `self.module` below.
-                let (next_vreg, blocks, local_variables, arguments) = {
-                    let mut function_generator =
-                        FunctionGenerator::new(&self.registry, &self.module.global_list);
+                let body = {
+                    let mut function_generator = FunctionGenerator::new(
+                        &self.registry,
+                        &self.module.global_list,
+                        resolved_types,
+                    );
                     function_generator.generate(fn_def)?;
 
-                    let next_vreg = function_generator.next_vreg;
-                    // Convert the flat IR statement list into basic blocks.
-                    let blocks = Self::harvest_function_irs(function_generator.irs);
-                    let local_variables = function_generator.local_variables;
-                    let arguments = function_generator.arguments;
-                    (next_vreg, blocks, local_variables, arguments)
+                    FunctionBody {
+                        arguments: function_generator.arguments,
+                        blocks: Self::harvest_function_irs(function_generator.irs),
+                        next_vreg: function_generator.next_vreg,
+                    }
                 };
 
-                // Look up the Function entry that was created during pass 2
-                // and populate it with the generated body.
-                let func = self
+                // Attach the body to the Function entry created during pass 2.
+                match self
                     .module
                     .function_list
-                    .get_mut(&fn_def.fn_decl.identifier);
-
-                if let Some(f) = func {
-                    f.blocks = Some(blocks);
-                    f.local_variables = Some(local_variables);
-                    f.arguments = arguments;
-                    f.next_vreg = next_vreg;
-                } else {
-                    return Err(Error::FunctionNotDefined {
-                        symbol: fn_def.fn_decl.identifier.clone(),
-                    });
+                    .get_mut(&fn_def.fn_decl.identifier)
+                {
+                    Some(f) => f.body = Some(body),
+                    None => {
+                        return Err(Error::FunctionNotDefined {
+                            symbol: fn_def.fn_decl.identifier.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -114,14 +130,14 @@ impl<'a> Generator for IrGenerator<'a> {
         printer.emit_header(Self::TARGET_TRIPLE, Self::TARGET_DATALAYOUT)?;
 
         // Emit all struct type definitions collected during IR generation.
-        for (name, st) in self.registry.struct_types.iter() {
+        for (name, st) in &self.registry.struct_types {
             printer.emit_struct_type(name, st)?;
         }
         printer.emit_newline()?;
 
         // Emit all global variable declarations and definitions.
-        for global in self.module.global_list.values() {
-            printer.emit_global(global)?;
+        for (name, def) in &self.module.global_list {
+            printer.emit_global(name, def)?;
         }
         printer.emit_newline()?;
 
@@ -135,10 +151,13 @@ impl<'a> Generator for IrGenerator<'a> {
                 .ok_or_else(|| Error::FunctionNotDefined {
                     symbol: func.identifier.clone(),
                 })?;
-            if let Some(blocks) = &func.blocks {
-                printer.emit_function_def(func, &func_type.return_dtype, blocks)?;
-            } else {
-                printer.emit_function_decl(&func.identifier, func_type)?;
+            match &func.body {
+                Some(body) => {
+                    printer.emit_function_def(&func.identifier, &func_type.return_dtype, body)?;
+                }
+                None => {
+                    printer.emit_function_decl(&func.identifier, func_type)?;
+                }
             }
         }
 
@@ -147,7 +166,7 @@ impl<'a> Generator for IrGenerator<'a> {
 }
 
 /// Private helper methods on `IrGenerator` for each category of top-level AST node.
-impl<'a> IrGenerator<'a> {
+impl IrGenerator<'_> {
     /// Process a single `use` statement from the source program.
     ///
     /// Resolves the path to `<module_name>.teah` relative to the source
@@ -164,7 +183,7 @@ impl<'a> IrGenerator<'a> {
     /// # Errors
     ///
     /// Returns [`Error::ModuleNotFound`] if the `.teah` file does not
-    /// exist, [`Error::ModuleParseError`] if it cannot be parsed, and
+    /// exist, [`Error::ModuleParseFailed`] if it cannot be parsed, and
     /// propagates any [`Error::Io`] encountered while reading the file.
     fn handle_use_stmt(&mut self, use_stmt: &ast::UseStmt) -> Result<(), Error> {
         let module_name = &use_stmt.module_name;
@@ -179,13 +198,13 @@ impl<'a> IrGenerator<'a> {
 
         let source = fs::read_to_string(&header_path)?;
         let mut parser = crate::parser::Parser::new(&source);
-        parser.generate().map_err(|e| Error::ModuleParseError {
+        parser.generate().map_err(|e| Error::ModuleParseFailed {
             module_name: module_name.clone(),
             message: e.to_string(),
         })?;
 
         if let Some(program) = parser.program {
-            for elem in program.elements.iter() {
+            for elem in &program.elements {
                 // Header files are expected to contain only `fn` declarations.
                 // Other element kinds (global variables, struct definitions,
                 // function bodies) are not valid in a `.teah` file and are
@@ -242,30 +261,27 @@ impl<'a> IrGenerator<'a> {
         let mut terminated = false;
 
         for stmt in irs {
-            match &stmt.inner {
-                StmtInner::Label(l) => {
-                    // Finalise the previous block (if any) and start a new one.
-                    if let Some(prev_label) = label.take() {
-                        blocks.push(BasicBlock {
-                            label: prev_label,
-                            stmts: std::mem::take(&mut stmts),
-                        });
-                    }
-                    label = Some(l.label.clone());
-                    terminated = false;
+            if let StmtInner::Label(l) = &stmt.inner {
+                // Finalise the previous block (if any) and start a new one.
+                if let Some(prev_label) = label.take() {
+                    blocks.push(BasicBlock {
+                        label: prev_label,
+                        stmts: std::mem::take(&mut stmts),
+                    });
                 }
-                _ => {
-                    // Drop statements that precede the first label or follow a
-                    // terminator — they are unreachable (dead) code.
-                    if label.is_none() || terminated {
-                        continue;
-                    }
-                    terminated = matches!(
-                        &stmt.inner,
-                        StmtInner::Return(_) | StmtInner::CJump(_) | StmtInner::Jump(_)
-                    );
-                    stmts.push(stmt);
+                label = Some(l.label.clone());
+                terminated = false;
+            } else {
+                // Drop statements that precede the first label or follow a
+                // terminator — they are unreachable (dead) code.
+                if label.is_none() || terminated {
+                    continue;
                 }
+                terminated = matches!(
+                    &stmt.inner,
+                    StmtInner::Return(_) | StmtInner::CJump(_) | StmtInner::Jump(_)
+                );
+                stmts.push(stmt);
             }
         }
         if let Some(last_label) = label {
@@ -294,11 +310,60 @@ impl<'a> IrGenerator<'a> {
         // Insert hoisted allocas at the beginning of the entry block.
         blocks[0].stmts.splice(0..0, hoisted_allocas);
 
-        // Remove blocks that became empty (only a label, no terminator) after
-        // alloca hoisting, as they violate the basic block invariant.
-        blocks.retain(|block| !block.stmts.is_empty());
+        // Post-hoist invariant: every block still has at least a terminator
+        // (`return` / `jump` / `cjump`) because the IR generator always emits
+        // one for reachable blocks, and the terminator is not an alloca so it
+        // is never hoisted away.  Blocks that somehow ended up empty (only an
+        // alloca-only body) would become dangling jump targets if dropped, so
+        // we verify — and drop — them together with the edges that reach
+        // them.
+        Self::drop_empty_blocks_or_panic(&mut blocks);
 
         blocks
+    }
+
+    /// Removes empty basic blocks (no instructions after alloca hoisting) and
+    /// panics if any of them are still referenced by a `jump`/`cjump` in a
+    /// surviving block, since that would leave dangling branch targets.
+    ///
+    /// Under normal code-generator behaviour no block ever becomes empty, so
+    /// this routine is almost always a no-op; the panic fires only if the
+    /// generator breaks the "every reachable block has a terminator"
+    /// invariant.
+    fn drop_empty_blocks_or_panic(blocks: &mut Vec<BasicBlock>) {
+        if blocks.iter().all(|b| !b.stmts.is_empty()) {
+            return;
+        }
+
+        // Collect the labels referenced by any remaining (non-empty) block's
+        // terminator so we can tell whether an empty block is still reachable.
+        let mut referenced: HashSet<String> = HashSet::new();
+        for block in blocks.iter().filter(|b| !b.stmts.is_empty()) {
+            for stmt in &block.stmts {
+                match &stmt.inner {
+                    StmtInner::Jump(j) => {
+                        referenced.insert(j.target.key());
+                    }
+                    StmtInner::CJump(c) => {
+                        referenced.insert(c.true_label.key());
+                        referenced.insert(c.false_label.key());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for block in blocks.iter().filter(|b| b.stmts.is_empty()) {
+            let key = block.label.key();
+            assert!(
+                !referenced.contains(&key),
+                "BUG: basic block {key} is empty after alloca hoisting but \
+                 is still the target of a jump; IR generator produced a \
+                 reachable block without a terminator",
+            );
+        }
+
+        blocks.retain(|block| !block.stmts.is_empty());
     }
 
     /// Process a global variable declaration or definition.
@@ -311,13 +376,14 @@ impl<'a> IrGenerator<'a> {
     ///     individually via `handle_right_val_static`.
     ///   - **Array — fill**: a single value is repeated `count` times.
     ///   - **Scalar**: a single-element vector wrapping the scalar value.
-    /// * A [`GlobalVariable`] is inserted into the module's global list.
-    ///   If an entry with the same identifier already exists the function
-    ///   returns a [`Error::VariableRedefinition`] error.
+    /// * A [`GlobalDef`] is inserted into the module's global list, keyed by
+    ///   its fully-qualified name.  If an entry with the same identifier
+    ///   already exists the function returns a [`Error::VariableRedefinition`]
+    ///   error.
     fn handle_global_var_decl(&mut self, stmt: &ast::VarDeclStmt) -> Result<(), Error> {
-        let identifier = match stmt.identifier() {
-            Some(id) => id,
-            None => return Err(Error::SymbolMissing),
+        let identifier = match &stmt.inner {
+            ast::VarDeclStmtInner::Decl(d) => d.identifier.clone(),
+            ast::VarDeclStmtInner::Def(d) => d.identifier.clone(),
         };
 
         let dtype = Dtype::try_from(stmt)?;
@@ -342,21 +408,13 @@ impl<'a> IrGenerator<'a> {
             None
         };
 
+        if self.module.global_list.contains_key(identifier.as_str()) {
+            return Err(Error::VariableRedefinition { symbol: identifier });
+        }
         self.module
             .global_list
-            .insert(
-                identifier.clone(),
-                GlobalVariable {
-                    dtype,
-                    identifier,
-                    initializers,
-                },
-            )
-            .map_or(Ok(()), |v| {
-                Err(Error::VariableRedefinition {
-                    symbol: v.identifier,
-                })
-            })
+            .insert(Rc::from(identifier), GlobalDef { dtype, initializers });
+        Ok(())
     }
 
     /// Process a function declaration (`fn foo(...) -> T;`).
@@ -374,33 +432,14 @@ impl<'a> IrGenerator<'a> {
     ///    function list so that the printer can emit an external declaration.
     fn handle_fn_decl(&mut self, decl: &ast::FnDecl) -> Result<(), Error> {
         let identifier = decl.identifier.clone();
+        let function_type = FunctionType::try_from(decl)?;
 
-        let mut arguments = Vec::new();
-        if let Some(params) = &decl.param_decl {
-            for decl in params.decls.iter() {
-                let id = decl.identifier().ok_or(Error::SymbolMissing)?;
-                let dtype = Dtype::try_from(decl)?;
-                if matches!(&dtype, Dtype::Array { .. }) {
-                    return Err(Error::ArrayParameterNotAllowed { symbol: id });
-                }
-                arguments.push((id, dtype));
-            }
-        }
-
-        let function_type = FunctionType {
-            return_dtype: match decl.return_dtype.as_ref() {
-                Some(type_specifier) => type_specifier.into(),
-                None => Dtype::Void,
-            },
-            arguments,
-        };
-
-        if let Some(ftype) = self
+        if let Some(prior) = self
             .registry
             .function_types
             .insert(identifier.clone(), function_type.clone())
         {
-            if ftype != function_type {
+            if prior != function_type {
                 return Err(Error::ConflictedFunction { symbol: identifier });
             }
         }
@@ -408,11 +447,8 @@ impl<'a> IrGenerator<'a> {
         self.module.function_list.insert(
             identifier.clone(),
             Function {
-                arguments: Vec::new(),
-                local_variables: None,
-                identifier: identifier.clone(),
-                blocks: None,
-                next_vreg: 0,
+                identifier,
+                body: None,
             },
         );
 
@@ -434,8 +470,9 @@ impl<'a> IrGenerator<'a> {
 
         match self.registry.function_types.get(&identifier) {
             None => self.handle_fn_decl(&stmt.fn_decl)?,
-            Some(ty) => {
-                if ty != stmt.fn_decl.as_ref() {
+            Some(prior) => {
+                let def_type = FunctionType::try_from(stmt.fn_decl.as_ref())?;
+                if *prior != def_type {
                     return Err(Error::DeclDefMismatch {
                         symbol: identifier.clone(),
                     });
@@ -464,7 +501,7 @@ impl<'a> IrGenerator<'a> {
         let identifier = struct_def.identifier.clone();
         let mut elements = Vec::new();
 
-        for (offset, decl) in struct_def.decls.iter().enumerate() {
+        for (index, decl) in struct_def.decls.iter().enumerate() {
             let base_dtype = match decl.type_specifier.as_ref() {
                 Some(type_specifier) => type_specifier.into(),
                 None => Dtype::Void,
@@ -482,7 +519,7 @@ impl<'a> IrGenerator<'a> {
             elements.push((
                 decl.identifier.clone(),
                 StructMember {
-                    offset: offset as i32,
+                    index,
                     dtype: match &decl.inner {
                         ast::VarDeclInner::Scalar => base_dtype,
                         ast::VarDeclInner::Array(array) => Dtype::array_of(base_dtype, array.len),

@@ -5,57 +5,51 @@ use crate::common::graph::BackwardLiveness;
 use crate::ir::function::{BasicBlock, BlockLabel, Function};
 use crate::ir::stmt::{OperandRole, Stmt, StmtInner};
 use crate::ir::types::Dtype;
-use crate::ir::value::{LocalVariable, Operand};
+use crate::ir::{Local, LocalId, Operand};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct Mem2RegPass;
 
 impl FunctionPass for Mem2RegPass {
     fn run(&self, func: &mut Function) {
-        let Function {
-            blocks: ref mut blocks_opt,
-            ref mut next_vreg,
-            ..
-        } = *func;
-
-        let Some(blocks) = blocks_opt.as_mut() else {
+        let Some(body) = func.body.as_mut() else {
             return;
         };
-        if blocks.is_empty() {
+        if body.blocks.is_empty() {
             return;
         }
 
-        let cfg = Cfg::from_blocks(blocks);
+        let cfg = Cfg::from_blocks(&body.blocks);
         let dom_info = DominatorInfo::compute(cfg.graph());
-        let analysis = AllocaAnalysis::from_blocks(blocks);
+        let analysis = AllocaAnalysis::from_blocks(&body.blocks);
         let promotable = analysis.promotable_vars(&dom_info);
 
         if !promotable.is_empty() {
             let mut phis = PhiPlacement::new(cfg.num_blocks());
-            Self::place_phis(&promotable, &mut phis, &cfg, &dom_info, next_vreg);
+            Self::place_phis(&promotable, &mut phis, &cfg, &dom_info, &mut body.next_vreg);
 
             let mut renamer = Renamer::new(
-                blocks,
+                &body.blocks,
                 &cfg,
                 &dom_info,
                 &mut phis,
                 promotable.keys().copied().collect(),
             );
             renamer.run();
-            *blocks = renamer.finish();
+            body.blocks = renamer.finish();
         }
     }
 }
 
 impl Mem2RegPass {
     fn place_phis(
-        promotable: &HashMap<usize, VarUsage>,
+        promotable: &HashMap<LocalId, VarUsage>,
         phi_placement: &mut PhiPlacement,
         cfg: &Cfg,
         dom_info: &DominatorInfo,
         next_vreg: &mut usize,
     ) {
-        for (&var_idx, info) in promotable.iter() {
+        for (&var_id, info) in promotable.iter() {
             if !info.has_load {
                 continue;
             }
@@ -74,14 +68,14 @@ impl Mem2RegPass {
                     if !liveness.live_in[y] {
                         continue;
                     }
-                    if phi_placement.has_phi(y, var_idx) {
+                    if phi_placement.has_phi(y, var_id) {
                         continue;
                     }
 
-                    let idx = *next_vreg;
+                    let id = LocalId(*next_vreg);
                     *next_vreg += 1;
-                    let dst = Operand::from(LocalVariable::new(Dtype::I32, idx, None));
-                    phi_placement.insert_phi(y, var_idx, dst);
+                    let dst = Operand::from(Local::new(Dtype::I32, id));
+                    phi_placement.insert_phi(y, var_id, dst);
 
                     if !info.def_blocks.contains(&y) {
                         worklist.push_back(y);
@@ -93,7 +87,7 @@ impl Mem2RegPass {
 }
 
 struct AllocaAnalysis {
-    usage: HashMap<usize, VarUsage>,
+    usage: HashMap<LocalId, VarUsage>,
 }
 
 impl AllocaAnalysis {
@@ -118,7 +112,7 @@ impl AllocaAnalysis {
     ///
     /// Single-definition variables are rate-limited to avoid exploding the
     /// register allocator's interference graph on stress tests.
-    fn promotable_vars(&self, dom_info: &DominatorInfo) -> HashMap<usize, VarUsage> {
+    fn promotable_vars(&self, dom_info: &DominatorInfo) -> HashMap<LocalId, VarUsage> {
         let mut multi_def = HashMap::new();
         let mut single_def = HashMap::new();
 
@@ -166,17 +160,17 @@ impl AllocaAnalysis {
 
     /// Scans all blocks for alloca instructions that produce `*i32` pointers.
     ///
-    /// Returns the set of virtual register indices for these allocas. Only i32
-    /// pointer allocas are considered because the current implementation only
+    /// Returns the set of [`LocalId`]s for these allocas. Only i32 pointer
+    /// allocas are considered because the current implementation only
     /// supports promoting scalar integer values.
-    fn collect_candidates(blocks: &[BasicBlock]) -> HashSet<usize> {
+    fn collect_candidates(blocks: &[BasicBlock]) -> HashSet<LocalId> {
         let mut candidates = HashSet::new();
         for stmt in blocks.iter().flat_map(|block| block.stmts.iter()) {
             if let StmtInner::Alloca(a) = &stmt.inner {
-                if let Some(idx) = a.dst.vreg_index() {
+                if let Some(id) = a.dst.local_id() {
                     if let Dtype::Pointer { pointee } = a.dst.dtype() {
                         if matches!(pointee.as_ref(), Dtype::I32) {
-                            candidates.insert(idx);
+                            candidates.insert(id);
                         }
                     }
                 }
@@ -196,33 +190,33 @@ impl AllocaAnalysis {
     ///   passed to a call or used as a general operand rather than load/store).
     fn analyze_usage(
         blocks: &[BasicBlock],
-        candidates: &HashSet<usize>,
-    ) -> HashMap<usize, VarUsage> {
-        let mut usage: HashMap<usize, VarUsage> = candidates
+        candidates: &HashSet<LocalId>,
+    ) -> HashMap<LocalId, VarUsage> {
+        let mut usage: HashMap<LocalId, VarUsage> = candidates
             .iter()
             .map(|&v| (v, VarUsage::default()))
             .collect();
 
         for (b_idx, block) in blocks.iter().enumerate() {
-            let mut store_seen: HashSet<usize> = HashSet::new();
+            let mut store_seen: HashSet<LocalId> = HashSet::new();
 
             for stmt in &block.stmts {
                 for op_ref in stmt.operands() {
-                    let Some(idx) = op_ref.operand.vreg_index() else {
+                    let Some(id) = op_ref.operand.local_id() else {
                         continue;
                     };
-                    let Some(info) = usage.get_mut(&idx) else {
+                    let Some(info) = usage.get_mut(&id) else {
                         continue;
                     };
                     match op_ref.role {
                         OperandRole::LoadPtr => {
-                            if !store_seen.contains(&idx) {
+                            if !store_seen.contains(&id) {
                                 info.load_before_store_blocks.insert(b_idx);
                             }
                             info.has_load = true;
                         }
                         OperandRole::StorePtr => {
-                            store_seen.insert(idx);
+                            store_seen.insert(id);
                             info.has_store = true;
                             info.def_blocks.insert(b_idx);
                         }
@@ -250,14 +244,14 @@ struct VarUsage {
 
 #[derive(Clone)]
 struct PhiInfo {
-    var: usize,
+    var: LocalId,
     dst: Operand,
     incomings: Vec<(BlockLabel, Operand)>,
 }
 
 struct PhiPlacement {
     nodes: Vec<Vec<PhiInfo>>,
-    lookup: Vec<HashMap<usize, usize>>,
+    lookup: Vec<HashMap<LocalId, usize>>,
 }
 
 impl PhiPlacement {
@@ -268,7 +262,7 @@ impl PhiPlacement {
         }
     }
 
-    fn insert_phi(&mut self, block: usize, var: usize, dst: Operand) {
+    fn insert_phi(&mut self, block: usize, var: LocalId, dst: Operand) {
         let phi = PhiInfo {
             var,
             dst,
@@ -278,7 +272,7 @@ impl PhiPlacement {
         self.nodes[block].push(phi);
     }
 
-    fn has_phi(&self, block: usize, var: usize) -> bool {
+    fn has_phi(&self, block: usize, var: LocalId) -> bool {
         self.lookup[block].contains_key(&var)
     }
 
@@ -296,9 +290,9 @@ struct Renamer<'a> {
     cfg: &'a Cfg,
     dom_info: &'a DominatorInfo,
     phi_placement: &'a mut PhiPlacement,
-    promoted: HashSet<usize>,
-    var_stack: HashMap<usize, Vec<Operand>>,
-    alias_map: HashMap<usize, Operand>,
+    promoted: HashSet<LocalId>,
+    var_stack: HashMap<LocalId, Vec<Operand>>,
+    alias_map: HashMap<LocalId, Operand>,
     rewritten: Vec<Vec<Stmt>>,
 }
 
@@ -308,7 +302,7 @@ impl<'a> Renamer<'a> {
         cfg: &'a Cfg,
         dom_info: &'a DominatorInfo,
         phi_placement: &'a mut PhiPlacement,
-        promoted: HashSet<usize>,
+        promoted: HashSet<LocalId>,
     ) -> Self {
         let mut var_stack = HashMap::new();
         for var in promoted.iter().copied() {
@@ -352,8 +346,8 @@ impl<'a> Renamer<'a> {
     }
 
     fn rename_block(&mut self, block_idx: usize) {
-        let mut pushed_vars: Vec<usize> = Vec::new();
-        let mut added_aliases: Vec<usize> = Vec::new();
+        let mut pushed_vars: Vec<LocalId> = Vec::new();
+        let mut added_aliases: Vec<LocalId> = Vec::new();
 
         for phi in self.phi_placement.phis_at(block_idx) {
             if let Some(stack) = self.var_stack.get_mut(&phi.var) {
@@ -365,20 +359,20 @@ impl<'a> Renamer<'a> {
         for stmt in &self.blocks[block_idx].stmts {
             match &stmt.inner {
                 StmtInner::Alloca(a) => {
-                    if let Some(idx) = a.dst.vreg_index() {
-                        if self.promoted.contains(&idx) {
+                    if let Some(id) = a.dst.local_id() {
+                        if self.promoted.contains(&id) {
                             continue;
                         }
                     }
                     self.rewritten[block_idx].push(stmt.clone());
                 }
                 StmtInner::Store(s) => {
-                    if let Some(ptr_idx) = s.ptr.vreg_index() {
-                        if self.promoted.contains(&ptr_idx) {
+                    if let Some(ptr_id) = s.ptr.local_id() {
+                        if self.promoted.contains(&ptr_id) {
                             let src = self.resolve_alias(&s.src);
-                            if let Some(stack) = self.var_stack.get_mut(&ptr_idx) {
+                            if let Some(stack) = self.var_stack.get_mut(&ptr_id) {
                                 stack.push(src.clone());
-                                pushed_vars.push(ptr_idx);
+                                pushed_vars.push(ptr_id);
                             }
                             continue;
                         }
@@ -387,12 +381,12 @@ impl<'a> Renamer<'a> {
                     self.rewritten[block_idx].push(rewritten);
                 }
                 StmtInner::Load(s) => {
-                    if let Some(ptr_idx) = s.ptr.vreg_index() {
-                        if self.promoted.contains(&ptr_idx) {
-                            if let Some(dst_idx) = s.dst.vreg_index() {
-                                let cur = self.current_value(ptr_idx);
-                                self.alias_map.insert(dst_idx, cur);
-                                added_aliases.push(dst_idx);
+                    if let Some(ptr_id) = s.ptr.local_id() {
+                        if self.promoted.contains(&ptr_id) {
+                            if let Some(dst_id) = s.dst.local_id() {
+                                let cur = self.current_value(ptr_id);
+                                self.alias_map.insert(dst_id, cur);
+                                added_aliases.push(dst_id);
                             }
                             continue;
                         }
@@ -448,7 +442,7 @@ impl<'a> Renamer<'a> {
         self.alias_map.clear();
     }
 
-    fn current_value(&self, var: usize) -> Operand {
+    fn current_value(&self, var: LocalId) -> Operand {
         self.var_stack
             .get(&var)
             .and_then(|stack| stack.last())
@@ -460,7 +454,7 @@ impl<'a> Renamer<'a> {
         let mut cur = op.clone();
         loop {
             if let Operand::Local(l) = &cur {
-                if let Some(next) = self.alias_map.get(&l.index) {
+                if let Some(next) = self.alias_map.get(&l.id) {
                     cur = next.clone();
                     continue;
                 }

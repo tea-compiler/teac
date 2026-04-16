@@ -83,11 +83,10 @@ impl IrGenerator<'_> {
     pub fn handle_bool_biop_expr_static(expr: &ast::BoolBiOpExpr) -> Result<i32, Error> {
         let left = Self::handle_bool_expr_static(&expr.left)? != 0;
         let right = Self::handle_bool_expr_static(&expr.right)? != 0;
-        if expr.op == ast::BoolBiOp::And {
-            Ok((left && right) as i32)
-        } else {
-            Ok((left || right) as i32)
-        }
+        Ok(i32::from(match expr.op {
+            ast::BoolBiOp::And => left && right,
+            ast::BoolBiOp::Or => left || right,
+        }))
     }
 
     /// Statically evaluates a boolean unit.
@@ -112,26 +111,23 @@ impl IrGenerator<'_> {
     pub fn handle_com_op_expr_static(expr: &ast::ComExpr) -> Result<i32, Error> {
         let left = Self::handle_expr_unit_static(&expr.left)?;
         let right = Self::handle_expr_unit_static(&expr.right)?;
-        match expr.op {
-            ast::ComOp::Lt => Ok((left < right) as i32),
-            ast::ComOp::Eq => Ok((left == right) as i32),
-            ast::ComOp::Ge => Ok((left >= right) as i32),
-            ast::ComOp::Gt => Ok((left > right) as i32),
-            ast::ComOp::Le => Ok((left <= right) as i32),
-            ast::ComOp::Ne => Ok((left != right) as i32),
-        }
+        Ok(i32::from(match expr.op {
+            ast::ComOp::Lt => left < right,
+            ast::ComOp::Eq => left == right,
+            ast::ComOp::Ge => left >= right,
+            ast::ComOp::Gt => left > right,
+            ast::ComOp::Le => left <= right,
+            ast::ComOp::Ne => left != right,
+        }))
     }
 
     /// Statically evaluates a boolean unary operation expression.
     ///
-    /// Currently only the `Not` operator is supported, which inverts the boolean
-    /// value of the inner condition (0 becomes 1, non-zero becomes 0).
-    /// For any other unary operator, returns 0 as a default.
+    /// Inverts the boolean value of the inner condition (0 becomes 1,
+    /// non-zero becomes 0).
     pub fn handle_bool_uop_expr_static(expr: &ast::BoolUOpExpr) -> Result<i32, Error> {
-        if expr.op == ast::BoolUOp::Not {
-            Ok((Self::handle_bool_unit_static(&expr.cond)? == 0) as i32)
-        } else {
-            Ok(0)
+        match expr.op {
+            ast::BoolUOp::Not => Ok(i32::from(Self::handle_bool_unit_static(&expr.cond)? == 0)),
         }
     }
 }

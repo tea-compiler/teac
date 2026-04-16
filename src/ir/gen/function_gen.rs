@@ -8,22 +8,28 @@
 
 use crate::ast::{self, ArrayInitializer, AssignmentStmt, RightValList};
 use crate::ir::function::{BlockLabel, FunctionGenerator};
+use crate::ir::gen::conversions::{compose_var_decl_dtype, compose_var_def_dtype};
 use crate::ir::stmt::{ArithBinOp, CmpPredicate, StmtInner};
 use crate::ir::types::Dtype;
-use crate::ir::value::{LocalVariable, Operand};
+use crate::ir::value::{Local, Operand};
 use crate::ir::Error;
 
-/// Describes how stack storage for a local variable should be handled during IR generation.
-enum LocalStoragePlan {
-    /// Storage is deferred: the variable's type will be inferred from its first assignment.
-    Deferred,
-    /// Emit an `alloca` instruction immediately for the given element type.
-    Alloca(Dtype),
+/// Builds an i32-typed [`Operand`] for a GEP index.
+///
+/// Array/struct indices are `usize` in the AST and source-language domain
+/// but must be lowered to `i32` to match LLVM IR's GEP index width.  The
+/// compiler panics if a single declared array or struct exceeds `i32::MAX`
+/// elements — this is a hard limit on the emitted IR, not a TeaLang rule,
+/// and in practice no program will ever approach it.
+fn array_index_operand(index: usize) -> Operand {
+    Operand::from(
+        i32::try_from(index).expect("array/struct index exceeds i32::MAX (LLVM GEP width)"),
+    )
 }
 
 // ── Function entry-point generation ──────────────────────────────────────────
 
-impl<'ir> FunctionGenerator<'ir> {
+impl FunctionGenerator<'_> {
     /// Generates IR for a complete function definition.
     ///
     /// Emits the function entry label, allocates stack slots for every argument
@@ -48,47 +54,45 @@ impl<'ir> FunctionGenerator<'ir> {
 
         let arguments = function_type.arguments.clone();
         let return_dtype = function_type.return_dtype.clone();
-        // Emit the function entry label.
         self.emit_label(BlockLabel::Function(identifier.clone()));
 
         // Spill every argument to the stack (alloca + store) so they are addressable.
-        for (id, dtype) in arguments.iter() {
+        for (id, dtype) in &arguments {
             if self.local_variables.contains_key(id) {
                 return Err(Error::VariableRedefinition { symbol: id.clone() });
             }
 
             // Allocate a virtual register that carries the incoming argument value.
-            let var = LocalVariable::new(dtype.clone(), self.alloc_vreg(), Some(id.to_string()));
-            self.arguments.push(var.clone());
+            let arg_local = self.fresh_local(dtype.clone());
+            self.arguments.push(arg_local.clone());
 
             // Allocate a stack slot (pointer to the argument type) for the argument.
-            let alloca_var = LocalVariable::new(
-                Dtype::ptr_to(dtype.clone()),
-                self.alloc_vreg(),
-                Some(id.to_string()),
-            );
-            self.emit_alloca(Operand::from(alloca_var.clone()));
+            let slot = self.fresh_local(Dtype::ptr_to(dtype.clone()));
+            self.emit_alloca(Operand::from(&slot));
             // Store the incoming value into the newly allocated stack slot.
-            self.emit_store(Operand::from(var), Operand::from(alloca_var.clone()));
-            self.local_variables.insert(id.clone(), alloca_var);
+            self.emit_store(Operand::from(arg_local), Operand::from(&slot));
+            self.local_variables.insert(id.clone(), slot);
         }
 
         // Lower the function body statement by statement.
-        for stmt in from.stmts.iter() {
+        for stmt in &from.stmts {
             self.handle_block(stmt, None, None)?;
         }
 
-        // Append an implicit return if the last instruction is not already a return.
+        // Append an implicit return if the last instruction is not already a
+        // return.  `FunctionType::try_from` whitelists return types to
+        // Void/I32 at registration, so any other variant here would be a
+        // broken invariant in the front-end.
         if let Some(stmt) = self.irs.last() {
             if !matches!(stmt.inner, StmtInner::Return(_)) {
                 match &return_dtype {
-                    Dtype::I32 => {
-                        self.emit_return(Some(Operand::from(0)));
-                    }
-                    Dtype::Void => {
-                        self.emit_return(None);
-                    }
-                    _ => return Err(Error::ReturnTypeUnsupported),
+                    Dtype::I32 => self.emit_return(Some(Operand::from(0))),
+                    Dtype::Void => self.emit_return(None),
+                    other => unreachable!(
+                        "function {} has return type {other} which \
+                         FunctionType::try_from should have rejected",
+                        identifier
+                    ),
                 }
             }
         }
@@ -99,7 +103,7 @@ impl<'ir> FunctionGenerator<'ir> {
 
 // ── Statement handlers ────────────────────────────────────────────────────────
 
-impl<'ir> FunctionGenerator<'ir> {
+impl FunctionGenerator<'_> {
     /// Dispatches a single code-block statement to the appropriate handler.
     ///
     /// `con_label` and `bre_label` are the jump targets for `continue` and
@@ -108,8 +112,8 @@ impl<'ir> FunctionGenerator<'ir> {
     pub fn handle_block(
         &mut self,
         stmt: &ast::CodeBlockStmt,
-        con_label: Option<BlockLabel>,
-        bre_label: Option<BlockLabel>,
+        con_label: Option<&BlockLabel>,
+        bre_label: Option<&BlockLabel>,
     ) -> Result<(), Error> {
         match &stmt.inner {
             ast::CodeBlockStmtInner::Assignment(s) => self.handle_assignment_stmt(s),
@@ -129,38 +133,12 @@ impl<'ir> FunctionGenerator<'ir> {
 
     /// Lowers an assignment statement (`left = right`).
     ///
-    /// If the left-hand side resolves to an `Undecided` type (a bare identifier
-    /// that has not been declared yet), a new stack slot is allocated with the
-    /// type inferred from the right-hand side, and the variable is registered as
-    /// a new scoped local.
+    /// `handle_left_val` yields a pointer to the destination's stack slot and
+    /// `handle_right_val` yields the value to store, so the assignment is a
+    /// single `store` instruction.
     pub fn handle_assignment_stmt(&mut self, stmt: &AssignmentStmt) -> Result<(), Error> {
-        let mut left = self.handle_left_val(&stmt.left_val)?;
+        let left = self.handle_left_val(&stmt.left_val)?;
         let right = self.handle_right_val(&stmt.right_val)?;
-
-        // Left side has no concrete type yet — allocate a slot and register as a new local.
-        if left.dtype() == &Dtype::Undecided {
-            let left_name = match &stmt.left_val.inner {
-                ast::LeftValInner::Id(id) => Some(id.clone()),
-                _ => None,
-            };
-            // Infer the stack-slot type from the right-hand-side value.
-            let right_type = right.dtype();
-            let local_val = LocalVariable::new(
-                Dtype::ptr_to(right_type.clone()),
-                self.alloc_vreg(),
-                left_name.clone(),
-            );
-            left = Operand::from(local_val.clone());
-            self.emit_alloca(left.clone());
-
-            let local_name = left_name.ok_or(Error::SymbolMissing)?;
-            let inserted = self.local_variables.insert(local_name.clone(), local_val);
-            if inserted.is_none() {
-                self.record_scoped_local(local_name);
-            }
-        }
-
-        // Write the right-hand-side value into the destination slot.
         self.emit_store(right, left);
         Ok(())
     }
@@ -173,7 +151,7 @@ impl<'ir> FunctionGenerator<'ir> {
     fn insert_scoped_local(
         &mut self,
         identifier: &str,
-        variable: LocalVariable,
+        variable: Local,
     ) -> Result<(), Error> {
         if self
             .local_variables
@@ -188,104 +166,65 @@ impl<'ir> FunctionGenerator<'ir> {
         Ok(())
     }
 
-    /// Creates a new pointer-typed local variable and emits an `alloca` for it.
+    /// Creates a new pointer-typed local and emits an `alloca` for it.
     ///
-    /// Returns the resulting [`LocalVariable`] whose type is `*pointee`.
-    fn allocate_pointer_local(&mut self, identifier: &str, pointee: Dtype) -> LocalVariable {
-        let variable = LocalVariable::new(
-            Dtype::ptr_to(pointee),
-            self.alloc_vreg(),
-            Some(identifier.to_string()),
-        );
-        self.emit_alloca(Operand::from(variable.clone()));
-        variable
+    /// Returns the resulting [`Local`] whose type is `*pointee`.
+    fn allocate_pointer_local(&mut self, pointee: Dtype) -> Local {
+        let local = self.fresh_local(Dtype::ptr_to(pointee));
+        self.emit_alloca(Operand::from(&local));
+        local
     }
 
     /// Allocates stack space for a scalar local and initializes it with `right_val`.
     ///
     /// Combines [`allocate_pointer_local`] with an immediate `store` instruction.
-    fn define_scalar_local(
-        &mut self,
-        identifier: &str,
-        pointee: Dtype,
-        right_val: Operand,
-    ) -> LocalVariable {
-        let local = self.allocate_pointer_local(identifier, pointee);
-        self.emit_store(right_val, Operand::from(local.clone()));
+    fn define_scalar_local(&mut self, pointee: Dtype, right_val: Operand) -> Local {
+        let local = self.allocate_pointer_local(pointee);
+        self.emit_store(right_val, Operand::from(&local));
         local
     }
 
-    /// Determines the storage strategy for a variable *declaration* (no initialiser).
+    /// Resolves the element/scalar type of a local variable.
     ///
-    /// Returns `Deferred` for untyped scalars (type to be resolved at first
-    /// assignment), and `Alloca` for typed scalars and all arrays.
-    fn plan_local_decl_storage(decl: &ast::VarDecl) -> Result<LocalStoragePlan, Error> {
-        let dtype = decl.type_specifier.as_ref().map(Dtype::from);
-        match (&decl.inner, dtype.as_ref()) {
-            (ast::VarDeclInner::Scalar, None) => Ok(LocalStoragePlan::Deferred),
-            (ast::VarDeclInner::Scalar, Some(Dtype::I32)) => {
-                Ok(LocalStoragePlan::Alloca(Dtype::I32))
-            }
-            (ast::VarDeclInner::Scalar, Some(Dtype::Struct { type_name })) => {
-                Ok(LocalStoragePlan::Alloca(Dtype::Struct {
-                    type_name: type_name.clone(),
-                }))
-            }
-            (ast::VarDeclInner::Array(arr), None | Some(Dtype::I32)) => Ok(
-                LocalStoragePlan::Alloca(Dtype::array_of(Dtype::I32, arr.len)),
-            ),
-            (ast::VarDeclInner::Array(arr), Some(Dtype::Struct { type_name })) => {
-                Ok(LocalStoragePlan::Alloca(Dtype::array_of(
-                    Dtype::Struct {
-                        type_name: type_name.clone(),
-                    },
-                    arr.len,
-                )))
-            }
-            _ => Err(Error::LocalVarDefinitionUnsupported),
+    /// For typed declarations the base comes directly from the AST annotation.
+    /// For **untyped scalars**, the base comes from the resolved-types map
+    /// produced by the type inference pass (falling back to `i32` when
+    /// inference could not determine anything — e.g. a declared-but-never-used
+    /// local).  **Untyped arrays** always default to `i32` elements because
+    /// TeaLang does not support inferring an array's element type.
+    fn local_base_dtype(
+        &self,
+        identifier: &str,
+        explicit: Option<&Dtype>,
+        is_scalar: bool,
+    ) -> Dtype {
+        match (explicit, is_scalar) {
+            (Some(t), _) => t.clone(),
+            (None, true) => self
+                .resolved_types
+                .get(identifier)
+                .cloned()
+                .unwrap_or(Dtype::I32),
+            (None, false) => Dtype::I32,
         }
     }
 
-    /// Determines the storage strategy for a scalar variable *definition*.
-    ///
-    /// Returns `Deferred` when no explicit type annotation is present so that
-    /// the type is inferred from the initialiser expression.
-    fn plan_local_scalar_def_storage(dtype: &Option<Dtype>) -> Result<LocalStoragePlan, Error> {
-        match dtype.as_ref() {
-            None => Ok(LocalStoragePlan::Deferred),
-            Some(Dtype::I32) => Ok(LocalStoragePlan::Alloca(Dtype::I32)),
-            Some(Dtype::Struct { type_name }) => Ok(LocalStoragePlan::Alloca(Dtype::Struct {
-                type_name: type_name.clone(),
-            })),
-            _ => Err(Error::LocalVarDefinitionUnsupported),
-        }
+    /// Determines the storage type for a local variable *declaration*
+    /// (no initialiser).
+    fn plan_local_decl_storage(&self, decl: &ast::VarDecl) -> Dtype {
+        let explicit = decl.type_specifier.as_ref().map(Dtype::from);
+        let is_scalar = matches!(&decl.inner, ast::VarDeclInner::Scalar);
+        let base = self.local_base_dtype(&decl.identifier, explicit.as_ref(), is_scalar);
+        compose_var_decl_dtype(base, &decl.inner)
     }
 
-    /// Returns the concrete array [`Dtype`] for an array variable definition.
-    ///
-    /// Only `i32` element arrays are currently supported; other element types
-    /// return `LocalVarDefinitionUnsupported`.
-    fn plan_local_array_def_storage(dtype: &Option<Dtype>, len: usize) -> Result<Dtype, Error> {
-        match dtype.as_ref() {
-            None | Some(Dtype::I32) => Ok(Dtype::array_of(Dtype::I32, len)),
-            _ => Err(Error::LocalVarDefinitionUnsupported),
-        }
-    }
-
-    /// Lowers a local variable declaration (without an initialiser).
-    ///
-    /// Allocates storage according to [`plan_local_decl_storage`] and registers
-    /// the variable in the current scope.
+    /// Lowers a local variable declaration (without an initialiser) by
+    /// allocating a stack slot of the declaration's storage type and
+    /// inserting it into the current scope's symbol table.
     pub fn handle_local_var_decl(&mut self, decl: &ast::VarDecl) -> Result<(), Error> {
         let identifier = decl.identifier.as_str();
-        let variable = match Self::plan_local_decl_storage(decl)? {
-            LocalStoragePlan::Deferred => LocalVariable::new(
-                Dtype::Undecided,
-                self.alloc_vreg(),
-                Some(identifier.to_string()),
-            ),
-            LocalStoragePlan::Alloca(pointee) => self.allocate_pointer_local(identifier, pointee),
-        };
+        let pointee = self.plan_local_decl_storage(decl);
+        let variable = self.allocate_pointer_local(pointee);
         self.insert_scoped_local(identifier, variable)
     }
 
@@ -297,16 +236,12 @@ impl<'ir> FunctionGenerator<'ir> {
     /// # Parameters
     /// - `base_ptr`: operand pointing to the first element of the array.
     /// - `vals`: list of right-hand-side values to store sequentially.
-    pub fn init_array(&mut self, base_ptr: Operand, vals: &RightValList) -> Result<(), Error> {
+    pub fn init_array(&mut self, base_ptr: &Operand, vals: &RightValList) -> Result<(), Error> {
         for (i, val) in vals.iter().enumerate() {
-            let element_ptr = self.alloc_temporary(Dtype::ptr_to(Dtype::I32));
+            let element_ptr = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
             let right_elem = self.handle_right_val(val)?;
 
-            self.emit_gep(
-                element_ptr.clone(),
-                base_ptr.clone(),
-                Operand::from(i as i32),
-            );
+            self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
             self.emit_store(right_elem, element_ptr);
         }
         Ok(())
@@ -319,7 +254,7 @@ impl<'ir> FunctionGenerator<'ir> {
     /// every index up to `count`.
     pub fn init_array_from(
         &mut self,
-        base_ptr: Operand,
+        base_ptr: &Operand,
         initializer: &ArrayInitializer,
     ) -> Result<(), Error> {
         match initializer {
@@ -327,12 +262,8 @@ impl<'ir> FunctionGenerator<'ir> {
             ArrayInitializer::Fill { val, count } => {
                 let fill_val = self.handle_right_val(val)?;
                 for i in 0..*count {
-                    let element_ptr = self.alloc_temporary(Dtype::ptr_to(Dtype::I32));
-                    self.emit_gep(
-                        element_ptr.clone(),
-                        base_ptr.clone(),
-                        Operand::from(i as i32),
-                    );
+                    let element_ptr = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
+                    self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
                     self.emit_store(fill_val.clone(), element_ptr);
                 }
                 Ok(())
@@ -340,30 +271,23 @@ impl<'ir> FunctionGenerator<'ir> {
         }
     }
 
-    /// Lowers a local variable definition (declaration with an initializer).
-    ///
-    /// Handles both scalar and array initializers, then registers the resulting
-    /// local variable in the current scope.
+    /// Lowers a local variable definition (declaration with an initializer)
+    /// by allocating a stack slot and storing the initial value into it.
     pub fn handle_local_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
         let identifier = def.identifier.as_str();
-        let dtype = def.type_specifier.as_ref().map(Dtype::from);
+        let explicit = def.type_specifier.as_ref().map(Dtype::from);
+        let is_scalar = matches!(&def.inner, ast::VarDefInner::Scalar(_));
+        let base = self.local_base_dtype(identifier, explicit.as_ref(), is_scalar);
+        let pointee = compose_var_def_dtype(base, &def.inner);
 
-        let variable: LocalVariable = match &def.inner {
+        let variable: Local = match &def.inner {
             ast::VarDefInner::Scalar(scalar) => {
                 let right_val = self.handle_right_val(&scalar.val)?;
-                match Self::plan_local_scalar_def_storage(&dtype)? {
-                    LocalStoragePlan::Deferred => {
-                        self.define_scalar_local(identifier, right_val.dtype().clone(), right_val)
-                    }
-                    LocalStoragePlan::Alloca(pointee) => {
-                        self.define_scalar_local(identifier, pointee, right_val)
-                    }
-                }
+                self.define_scalar_local(pointee, right_val)
             }
             ast::VarDefInner::Array(array) => {
-                let pointee = Self::plan_local_array_def_storage(&dtype, array.len)?;
-                let local = self.allocate_pointer_local(identifier, pointee);
-                self.init_array_from(Operand::from(local.clone()), &array.initializer)?;
+                let local = self.allocate_pointer_local(pointee);
+                self.init_array_from(&Operand::from(&local), &array.initializer)?;
                 local
             }
         };
@@ -378,7 +302,7 @@ impl<'ir> FunctionGenerator<'ir> {
     pub fn handle_call_stmt(&mut self, stmt: &ast::CallStmt) -> Result<(), Error> {
         let function_name = stmt.fn_call.qualified_name();
         let mut args = Vec::new();
-        for arg in stmt.fn_call.vals.iter() {
+        for arg in &stmt.fn_call.vals {
             let right_val = self.handle_right_val(arg)?;
             args.push(right_val);
         }
@@ -388,13 +312,17 @@ impl<'ir> FunctionGenerator<'ir> {
                 symbol: function_name,
             }),
             Some(function_type) => {
+                // `FunctionType::try_from` whitelists return types to Void/I32
+                // at registration; any other variant here would indicate a
+                // broken invariant in the front-end.
                 let retval = match &function_type.return_dtype {
-                    Dtype::Void => Ok(None),
-                    Dtype::I32 | Dtype::Struct { .. } => Ok(Some(
-                        self.alloc_temporary(function_type.return_dtype.clone()),
-                    )),
-                    _ => Err(Error::FunctionCallUnsupported),
-                }?;
+                    Dtype::Void => None,
+                    Dtype::I32 => Some(Operand::from(self.fresh_local(Dtype::I32))),
+                    other => unreachable!(
+                        "registered function {function_name} has return type {other} \
+                         which FunctionType::try_from should have rejected"
+                    ),
+                };
                 self.emit_call(function_name, retval, args);
                 Ok(())
             }
@@ -413,8 +341,8 @@ impl<'ir> FunctionGenerator<'ir> {
     pub fn handle_if_stmt(
         &mut self,
         stmt: &ast::IfStmt,
-        con_label: Option<BlockLabel>,
-        bre_label: Option<BlockLabel>,
+        con_label: Option<&BlockLabel>,
+        bre_label: Option<&BlockLabel>,
     ) -> Result<(), Error> {
         let true_label = self.alloc_basic_block();
         let false_label = self.alloc_basic_block();
@@ -426,8 +354,8 @@ impl<'ir> FunctionGenerator<'ir> {
         // Emit the then-branch; a new scope is opened so that any locals are cleaned up.
         self.emit_label(true_label);
         self.enter_scope();
-        for s in stmt.if_stmts.iter() {
-            self.handle_block(s, con_label.clone(), bre_label.clone())?;
+        for s in &stmt.if_stmts {
+            self.handle_block(s, con_label, bre_label)?;
         }
         self.exit_scope();
         // Jump past the else-branch to the merge point.
@@ -437,8 +365,8 @@ impl<'ir> FunctionGenerator<'ir> {
         self.emit_label(false_label);
         self.enter_scope();
         if let Some(else_stmts) = &stmt.else_stmts {
-            for s in else_stmts.iter() {
-                self.handle_block(s, con_label.clone(), bre_label.clone())?;
+            for s in else_stmts {
+                self.handle_block(s, con_label, bre_label)?;
             }
         }
         self.exit_scope();
@@ -474,8 +402,8 @@ impl<'ir> FunctionGenerator<'ir> {
         // Loop body; `continue` → test_label, `break` → false_label.
         self.emit_label(true_label);
         self.enter_scope();
-        for s in stmt.stmts.iter() {
-            self.handle_block(s, Some(test_label.clone()), Some(false_label.clone()))?;
+        for s in &stmt.stmts {
+            self.handle_block(s, Some(&test_label), Some(&false_label))?;
         }
         self.exit_scope();
         // Back-edge: jump back to the loop condition.
@@ -505,25 +433,25 @@ impl<'ir> FunctionGenerator<'ir> {
     /// Lowers a `continue` statement by jumping to the enclosing loop's test label.
     ///
     /// Returns `InvalidContinueInst` if called outside of a loop context.
-    pub fn handle_continue_stmt(&mut self, con_label: Option<BlockLabel>) -> Result<(), Error> {
+    pub fn handle_continue_stmt(&mut self, con_label: Option<&BlockLabel>) -> Result<(), Error> {
         let label = con_label.ok_or(Error::InvalidContinueInst)?;
-        self.emit_jump(label);
+        self.emit_jump(label.clone());
         Ok(())
     }
 
     /// Lowers a `break` statement by jumping to the enclosing loop's exit label.
     ///
     /// Returns `InvalidBreakInst` if called outside of a loop context.
-    pub fn handle_break_stmt(&mut self, bre_label: Option<BlockLabel>) -> Result<(), Error> {
+    pub fn handle_break_stmt(&mut self, bre_label: Option<&BlockLabel>) -> Result<(), Error> {
         let label = bre_label.ok_or(Error::InvalidBreakInst)?;
-        self.emit_jump(label);
+        self.emit_jump(label.clone());
         Ok(())
     }
 }
 
 // ── Expression and value handlers ─────────────────────────────────────────────
 
-impl<'ir> FunctionGenerator<'ir> {
+impl FunctionGenerator<'_> {
     /// Lowers a comparison expression into a conditional branch.
     ///
     /// Emits a `cmp` instruction (result type `i1`) followed by a conditional
@@ -537,9 +465,9 @@ impl<'ir> FunctionGenerator<'ir> {
         let left = self.handle_expr_unit(&expr.left)?;
         let right = self.handle_expr_unit(&expr.right)?;
 
-        let dst = self.alloc_temporary(Dtype::I1);
+        let dst = Operand::from(self.fresh_local(Dtype::I1));
         self.emit_cmp(
-            CmpPredicate::from(expr.op.clone()),
+            CmpPredicate::from(&expr.op),
             left,
             right,
             dst.clone(),
@@ -581,17 +509,24 @@ impl<'ir> FunctionGenerator<'ir> {
                     })?
                     .return_dtype;
 
-                let res = match &return_dtype {
-                    Dtype::I32 | Dtype::Struct { .. } => self.alloc_temporary(return_dtype.clone()),
-                    _ => {
+                // `FunctionType::try_from` whitelists return types to Void/I32.
+                // In expression position, only I32 is usable; a void call in
+                // an expression is a source-level mistake.
+                let res = match return_dtype {
+                    Dtype::I32 => Operand::from(self.fresh_local(Dtype::I32)),
+                    Dtype::Void => {
                         return Err(Error::InvalidExprUnit {
                             expr_unit: unit.clone(),
                         });
                     }
+                    other => unreachable!(
+                        "registered function {name} has return type {other} \
+                         which FunctionType::try_from should have rejected"
+                    ),
                 };
 
                 let mut args: Vec<Operand> = Vec::new();
-                for arg in fn_call.vals.iter() {
+                for arg in &fn_call.vals {
                     let rval = self.handle_right_val(arg)?;
                     args.push(rval);
                 }
@@ -612,13 +547,13 @@ impl<'ir> FunctionGenerator<'ir> {
                 if operand.is_addressable()
                     && !matches!(pointee.as_ref(), Dtype::Array { .. } | Dtype::Struct { .. }) =>
             {
-                let dst = self.alloc_temporary(pointee.as_ref().clone());
+                let dst = Operand::from(self.fresh_local(pointee.as_ref().clone()));
                 self.emit_load(dst.clone(), operand);
                 dst
             }
             // Auto-load global i32 values which are stored behind a pointer.
             Dtype::I32 if matches!(&operand, Operand::Global(_)) => {
-                let dst = self.alloc_temporary(Dtype::I32);
+                let dst = Operand::from(self.fresh_local(Dtype::I32));
                 self.emit_load(dst.clone(), operand);
                 dst
             }
@@ -648,10 +583,10 @@ impl<'ir> FunctionGenerator<'ir> {
                 });
             }
         };
-        let target = self.alloc_temporary(Dtype::ptr_to(Dtype::Array {
+        let target = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::Array {
             element: Box::new(element_type),
             length: None,
-        }));
+        })));
         self.emit_gep(target.clone(), operand, Operand::from(0i32));
         Ok(target)
     }
@@ -683,7 +618,7 @@ impl<'ir> FunctionGenerator<'ir> {
         // holding a pointer to an array), load the inner pointer first.
         let (arr, arr_dtype) = match arr.dtype() {
             Dtype::Pointer { pointee } if matches!(pointee.as_ref(), Dtype::Pointer { .. }) => {
-                let loaded = self.alloc_temporary(pointee.as_ref().clone());
+                let loaded = Operand::from(self.fresh_local(pointee.as_ref().clone()));
                 self.emit_load(loaded.clone(), arr);
                 (loaded.clone(), loaded.dtype().clone())
             }
@@ -692,14 +627,16 @@ impl<'ir> FunctionGenerator<'ir> {
 
         let target = match &arr_dtype {
             Dtype::Pointer { pointee } => match pointee.as_ref() {
-                Dtype::Array { element, .. } => {
-                    Ok(self.alloc_temporary(Dtype::ptr_to(element.as_ref().clone())))
-                }
-                _ => Ok(self.alloc_temporary(Dtype::ptr_to(pointee.as_ref().clone()))),
+                Dtype::Array { element, .. } => Ok(Operand::from(
+                    self.fresh_local(Dtype::ptr_to(element.as_ref().clone())),
+                )),
+                _ => Ok(Operand::from(
+                    self.fresh_local(Dtype::ptr_to(pointee.as_ref().clone())),
+                )),
             },
-            Dtype::Array { element, .. } => {
-                Ok(self.alloc_temporary(Dtype::ptr_to(element.as_ref().clone())))
-            }
+            Dtype::Array { element, .. } => Ok(Operand::from(
+                self.fresh_local(Dtype::ptr_to(element.as_ref().clone())),
+            )),
             _ => Err(Error::InvalidArrayExpression),
         }?;
 
@@ -711,7 +648,7 @@ impl<'ir> FunctionGenerator<'ir> {
 
     /// Lowers a struct member access expression (`s.member`) to a member pointer.
     ///
-    /// Looks up the struct type in the registry, finds the member's byte offset,
+    /// Looks up the struct type in the registry, finds the member's field index,
     /// and emits a GEP to yield a pointer to that member.
     fn handle_member_expr(&mut self, expr: &ast::MemberExpr) -> Result<Operand, Error> {
         let s = self.handle_left_val(&expr.struct_id)?;
@@ -733,16 +670,18 @@ impl<'ir> FunctionGenerator<'ir> {
             .map(|elem| &elem.1)
             .ok_or_else(|| Error::InvalidStructMemberExpression { expr: expr.clone() })?;
         let member_dtype = member.dtype.clone();
-        let member_offset = member.offset;
+        let member_index = i32::try_from(member.index).map_err(|_| {
+            Error::InvalidStructMemberExpression { expr: expr.clone() }
+        })?;
 
         let target = match &member_dtype {
-            Dtype::Void | Dtype::Undecided => {
+            Dtype::Void => {
                 return Err(Error::InvalidStructMemberExpression { expr: expr.clone() })
             }
-            _ => self.alloc_temporary(Dtype::ptr_to(member_dtype)),
+            _ => Operand::from(self.fresh_local(Dtype::ptr_to(member_dtype))),
         };
 
-        self.emit_gep(target.clone(), s, Operand::from(member_offset));
+        self.emit_gep(target.clone(), s, Operand::from(member_index));
         Ok(target)
     }
 
@@ -762,8 +701,8 @@ impl<'ir> FunctionGenerator<'ir> {
     fn handle_arith_biop_expr(&mut self, expr: &ast::ArithBiOpExpr) -> Result<Operand, Error> {
         let left = self.handle_arith_expr(&expr.left)?;
         let right = self.handle_arith_expr(&expr.right)?;
-        let dst = self.alloc_temporary(Dtype::I32);
-        self.emit_biop(ArithBinOp::from(expr.op.clone()), left, right, dst.clone());
+        let dst = Operand::from(self.fresh_local(Dtype::I32));
+        self.emit_biop(ArithBinOp::from(&expr.op), left, right, dst.clone());
         Ok(dst)
     }
 
@@ -775,18 +714,18 @@ impl<'ir> FunctionGenerator<'ir> {
         match &expr.inner {
             ast::IndexExprInner::Id(id) => {
                 let src = self.lookup_variable(id)?;
-                let idx = self.alloc_temporary(Dtype::I32);
+                let idx = Operand::from(self.fresh_local(Dtype::I32));
                 self.emit_load(idx.clone(), src);
                 Ok(idx)
             }
-            ast::IndexExprInner::Num(num) => Ok(Operand::from(*num as i32)),
+            ast::IndexExprInner::Num(num) => Ok(array_index_operand(*num)),
         }
     }
 }
 
 // ── Boolean expression handlers ───────────────────────────────────────────────
 
-impl<'ir> FunctionGenerator<'ir> {
+impl FunctionGenerator<'_> {
     /// Lowers a boolean expression to a materialized `i32` value (0 or 1).
     ///
     /// Allocates a temporary `i32` stack slot, evaluates the expression as a
@@ -798,7 +737,7 @@ impl<'ir> FunctionGenerator<'ir> {
         let after_label = self.alloc_basic_block();
 
         // Allocate stack storage for the materialised boolean result.
-        let bool_evaluated = self.alloc_temporary(Dtype::ptr_to(Dtype::I32));
+        let bool_evaluated = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
         self.emit_alloca(bool_evaluated.clone());
 
         // Branch-based evaluation; result is written into bool_evaluated.
@@ -811,7 +750,7 @@ impl<'ir> FunctionGenerator<'ir> {
         );
 
         // Load the materialised 0/1 value back into a register.
-        let loaded = self.alloc_temporary(Dtype::I32);
+        let loaded = Operand::from(self.fresh_local(Dtype::I32));
         self.emit_load(loaded.clone(), bool_evaluated);
 
         Ok(loaded)

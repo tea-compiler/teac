@@ -71,21 +71,25 @@ impl<'a> Generator for AArch64AsmGenerator<'a> {
         let layouts = StructLayouts::from_struct_types(&self.registry.struct_types)?;
 
         self.globals.clear();
-        for g in self.module.global_list.values() {
+        for (name, def) in &self.module.global_list {
             self.globals
-                .push(Self::handle_global(&layouts, g, self.target)?);
+                .push(Self::handle_global(&layouts, name, def, self.target)?);
         }
 
         self.functions.clear();
         for func in self.module.function_list.values() {
-            // Skip external declarations (blocks == None); they are provided by
-            // the linked object file (e.g. std.o) and must not be emitted as
-            // assembly symbols, otherwise the linker will report duplicate definitions.
-            if func.blocks.is_none() {
+            // Skip external declarations; they are provided by the linked
+            // object file (e.g. std.o) and must not be emitted as assembly
+            // symbols, otherwise the linker will report duplicate definitions.
+            let Some(body) = func.body.as_ref() else {
                 continue;
-            }
-            self.functions
-                .push(Self::handle_function(&layouts, func, self.target)?);
+            };
+            self.functions.push(Self::handle_function(
+                &layouts,
+                &func.identifier,
+                body,
+                self.target,
+            )?);
         }
 
         Ok(())
@@ -130,11 +134,11 @@ impl<'a> Generator for AArch64AsmGenerator<'a> {
 }
 
 impl<'a> AArch64AsmGenerator<'a> {
-    fn handle_arguments(func: &ir::Function) -> Result<Vec<Inst>, Error> {
+    fn handle_arguments(body: &ir::FunctionBody) -> Result<Vec<Inst>, Error> {
         let mut insts = Vec::new();
 
-        for (i, arg) in func.arguments.iter().enumerate() {
-            let v = arg.index;
+        for (i, arg) in body.arguments.iter().enumerate() {
+            let v = arg.id.0;
             let size = dtype_to_regsize(&arg.dtype)?;
 
             if i < 8 {
@@ -166,14 +170,15 @@ impl<'a> AArch64AsmGenerator<'a> {
 
     fn handle_global(
         layouts: &StructLayouts,
-        g: &ir::GlobalVariable,
+        name: &str,
+        def: &ir::GlobalDef,
         target: Target,
     ) -> Result<GeneratedGlobal, Error> {
-        let symbol = target.mangle_symbol(&g.identifier);
+        let symbol = target.mangle_symbol(name);
 
-        let data = match &g.dtype {
+        let data = match &def.dtype {
             ir::Dtype::I32 => {
-                let value = g
+                let value = def
                     .initializers
                     .as_ref()
                     .and_then(|v| v.first())
@@ -186,7 +191,7 @@ impl<'a> AArch64AsmGenerator<'a> {
                 let len = length.expect("unsized array in global data");
                 let (elem_size, _) = layouts.size_align_of(element.as_ref())?;
 
-                if let Some(inits) = &g.initializers {
+                if let Some(inits) = &def.initializers {
                     let words: Vec<i64> = inits.iter().take(len).map(|&v| v as i64).collect();
                     let remaining = len.saturating_sub(inits.len());
                     let zero_bytes = (remaining as i64) * elem_size;
@@ -201,7 +206,7 @@ impl<'a> AArch64AsmGenerator<'a> {
             }
             _ => {
                 return Err(Error::UnsupportedDtype {
-                    dtype: g.dtype.clone(),
+                    dtype: def.dtype.clone(),
                 })
             }
         };
@@ -211,22 +216,16 @@ impl<'a> AArch64AsmGenerator<'a> {
 
     fn handle_function(
         layouts: &StructLayouts,
-        func: &ir::Function,
+        identifier: &str,
+        body: &ir::FunctionBody,
         target: Target,
     ) -> Result<GeneratedFunction, Error> {
-        let symbol = lower_link_symbol(&func.identifier, target);
-        let Some(blocks) = func.blocks.as_ref() else {
-            return Ok(GeneratedFunction {
-                symbol,
-                frame_size: 0,
-                insts: Vec::new(),
-            });
-        };
-        let mut frame = StackFrame::from_blocks(blocks, layouts)?;
-        let mut next_vreg = func.next_vreg;
+        let symbol = lower_link_symbol(identifier, target);
+        let mut frame = StackFrame::from_blocks(&body.blocks, layouts)?;
+        let mut next_vreg = body.next_vreg;
         let mut cond_map: HashMap<usize, Cond> = HashMap::new();
         let mut insts: Vec<Inst> = Vec::new();
-        insts.extend(Self::handle_arguments(func)?);
+        insts.extend(Self::handle_arguments(body)?);
 
         {
             let mut ctx = FunctionGenerator {
@@ -238,7 +237,7 @@ impl<'a> AArch64AsmGenerator<'a> {
                 next_vreg: &mut next_vreg,
                 cond_map: &mut cond_map,
             };
-            phi_lowering::lower_function_blocks(&mut ctx, blocks)?;
+            phi_lowering::lower_function_blocks(&mut ctx, &body.blocks)?;
         }
 
         let alloc = register_allocator::allocate(&insts);

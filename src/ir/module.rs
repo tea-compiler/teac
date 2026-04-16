@@ -3,10 +3,11 @@
 
 use super::function::Function;
 use super::types::FunctionType;
-use super::value::GlobalVariable;
+use super::value::GlobalDef;
 use crate::ast;
 use indexmap::IndexMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use super::types::StructType;
 
@@ -23,8 +24,12 @@ pub struct Registry {
 /// Represents a compiled module containing all global variables and functions.
 /// This is the top-level container for the generated IR output.
 pub struct Module {
-    /// A map of global variable names to their definitions.
-    pub global_list: IndexMap<String, GlobalVariable>,
+    /// Module-level global variable definitions, keyed by name.
+    ///
+    /// The key is held as `Rc<str>` so that instruction operands can carry a
+    /// cheap reference (`GlobalRef { name: Rc<str>, .. }`) to the same string
+    /// without re-allocating every time a global appears in an instruction.
+    pub global_list: IndexMap<Rc<str>, GlobalDef>,
     /// A map of function names to their compiled function representations.
     pub function_list: IndexMap<String, Function>,
 }

@@ -10,9 +10,11 @@ use super::error::Error;
 use super::module::Registry;
 use super::stmt::{ArithBinOp, CmpPredicate, Stmt};
 use super::types::Dtype;
-use super::value::{GlobalVariable, LocalVariable, Operand};
+use super::value::{GlobalDef, GlobalRef, Local, LocalId, Operand};
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::rc::Rc;
 
 /// A label that identifies either a numbered basic block or a named function entry point.
 ///
@@ -29,8 +31,8 @@ pub enum BlockLabel {
 impl Display for BlockLabel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlockLabel::BasicBlock(index) => write!(f, "bb{}", index),
-            BlockLabel::Function(identifier) => write!(f, "{}", identifier),
+            BlockLabel::BasicBlock(index) => write!(f, "bb{index}"),
+            BlockLabel::Function(identifier) => write!(f, "{identifier}"),
         }
     }
 }
@@ -38,7 +40,7 @@ impl Display for BlockLabel {
 impl BlockLabel {
     /// Returns the string representation of this label, used as a map key.
     pub fn key(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 }
 
@@ -54,23 +56,24 @@ pub struct BasicBlock {
     pub stmts: Vec<Stmt>,
 }
 
-/// The final IR representation of a compiled function.
-///
-/// This struct is produced after code generation is complete and holds all
-/// information needed for subsequent optimization and assembly-emission passes.
+/// The IR representation of a function — either a declaration (external
+/// symbol with no body, typically imported from a `.teah` header) or a
+/// definition (body already generated).
 pub struct Function {
     /// The source-level name of the function.
     pub identifier: String,
-    /// All local variables declared in the function, keyed by their source-level
-    /// name. `None` before code generation has finished populating the map.
-    pub local_variables: Option<IndexMap<String, LocalVariable>>,
+    /// Body of the function, or `None` for an external declaration.
+    pub body: Option<FunctionBody>,
+}
+
+/// The fully-lowered body of a function definition.
+pub struct FunctionBody {
+    /// The function's formal parameters as a list of local SSA values.
+    pub arguments: Vec<Local>,
     /// The basic blocks that make up the function body, in emission order.
-    /// `None` before the flat IR statement list has been split into blocks.
-    pub blocks: Option<Vec<BasicBlock>>,
-    /// The function's formal parameters as a list of local variables.
-    pub arguments: Vec<LocalVariable>,
+    pub blocks: Vec<BasicBlock>,
     /// The next available virtual register index; preserved so that further
-    /// passes can allocate new temporaries without colliding with existing ones.
+    /// passes can allocate new locals without colliding with existing ones.
     pub next_vreg: usize,
 }
 
@@ -84,12 +87,16 @@ pub struct FunctionGenerator<'ir> {
     /// Shared type registry containing struct and function type definitions for
     /// the whole module.
     pub registry: &'ir Registry,
-    /// Reference to the module's global variable map, used during variable lookup.
-    pub global_variables: &'ir IndexMap<String, GlobalVariable>,
+    /// Reference to the module's global definitions, used during variable lookup.
+    pub global_variables: &'ir IndexMap<Rc<str>, GlobalDef>,
+    /// Resolved types for local variables produced by the type inference pass.
+    /// For variables declared without an explicit type annotation, this map
+    /// provides the inferred concrete type.
+    pub resolved_types: HashMap<String, Dtype>,
     /// Map of currently visible local variables, keyed by their source-level name.
     /// Variables are inserted when declared and removed when their enclosing scope
     /// exits.
-    pub local_variables: IndexMap<String, LocalVariable>,
+    pub local_variables: IndexMap<String, Local>,
     /// A stack of scopes. Each entry is the list of local variable names introduced
     /// in that scope, enabling bulk removal when the scope exits via [`exit_scope`].
     ///
@@ -97,12 +104,13 @@ pub struct FunctionGenerator<'ir> {
     scope_locals: Vec<Vec<String>>,
     /// The flat list of IR statements being accumulated for the current function.
     pub irs: Vec<Stmt>,
-    /// The function's formal parameters as local variables.
-    pub arguments: Vec<LocalVariable>,
-    /// Counter for allocating unique virtual register indices; incremented by
-    /// [`alloc_vreg`].
+    /// The function's formal parameters as local SSA values.
+    pub arguments: Vec<Local>,
+    /// Counter for allocating unique virtual register indices; advanced by
+    /// [`fresh_local`] / [`fresh_local_id`].
     ///
-    /// [`alloc_vreg`]: FunctionGenerator::alloc_vreg
+    /// [`fresh_local`]: FunctionGenerator::fresh_local
+    /// [`fresh_local_id`]: FunctionGenerator::fresh_local_id
     pub next_vreg: usize,
     /// Counter for allocating unique basic block label indices; starts at `1`
     /// because index `0` is reserved for the implicit function-entry block.
@@ -113,13 +121,18 @@ impl<'ir> FunctionGenerator<'ir> {
     /// Constructs a new [`FunctionGenerator`] with empty state, ready to build a
     /// function body. Virtual register allocation starts at `0` and basic block
     /// label allocation starts at `1`.
+    ///
+    /// `resolved_types` is the output of the type inference pass — a map from
+    /// local variable names to their inferred concrete types.
     pub fn new(
         registry: &'ir Registry,
-        global_variables: &'ir IndexMap<String, GlobalVariable>,
+        global_variables: &'ir IndexMap<Rc<str>, GlobalDef>,
+        resolved_types: HashMap<String, Dtype>,
     ) -> Self {
         Self {
             registry,
             global_variables,
+            resolved_types,
             local_variables: IndexMap::new(),
             scope_locals: Vec::new(),
             irs: Vec::new(),
@@ -129,18 +142,25 @@ impl<'ir> FunctionGenerator<'ir> {
         }
     }
 
-    /// Allocates and returns the next unique virtual register index, then advances
-    /// the internal counter.
-    pub fn alloc_vreg(&mut self) -> usize {
+    /// Allocates the next unique [`LocalId`] and advances the internal
+    /// counter.  Use [`fresh_local`] instead when a typed handle is wanted;
+    /// this raw-id form exists for passes (e.g. mem2reg's phi insertion)
+    /// that build their own [`Local`] by combining an id with a
+    /// context-specific type.
+    ///
+    /// [`fresh_local`]: FunctionGenerator::fresh_local
+    pub fn fresh_local_id(&mut self) -> LocalId {
         let idx = self.next_vreg;
         self.next_vreg += 1;
-        idx
+        LocalId(idx)
     }
 
-    /// Creates an unnamed temporary [`Operand`] of the given data type, backed by a
-    /// freshly allocated virtual register.
-    pub fn alloc_temporary(&mut self, dtype: Dtype) -> Operand {
-        Operand::from(LocalVariable::new(dtype, self.alloc_vreg(), None))
+    /// Allocates a fresh [`Local`] carrying `dtype` and a new, unique
+    /// [`LocalId`].  This is the single entry point for creating any SSA
+    /// local during IR lowering — arguments, named source-level variables,
+    /// and unnamed intermediate results all go through here.
+    pub fn fresh_local(&mut self, dtype: Dtype) -> Local {
+        Local::new(dtype, self.fresh_local_id())
     }
 
     /// Allocates and returns a new unique [`BlockLabel::BasicBlock`] label, then
@@ -164,8 +184,11 @@ impl<'ir> FunctionGenerator<'ir> {
     pub fn lookup_variable(&self, id: &str) -> Result<Operand, Error> {
         if let Some(local) = self.local_variables.get(id) {
             Ok(Operand::from(local))
-        } else if let Some(global) = self.global_variables.get(id) {
-            Ok(Operand::Global(global.clone()))
+        } else if let Some((name, def)) = self.global_variables.get_key_value(id) {
+            Ok(Operand::Global(GlobalRef {
+                name: Rc::clone(name),
+                dtype: def.dtype.clone(),
+            }))
         } else {
             Err(Error::VariableNotDefined {
                 symbol: id.to_string(),

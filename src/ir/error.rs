@@ -1,9 +1,20 @@
 use crate::ast;
+use crate::ir::types::Dtype;
 use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Type of variable '{symbol}' has not been determined at point of use")]
+    TypeNotDetermined { symbol: String },
+
+    #[error("Cannot assign type '{actual}' to variable '{symbol}' of type '{expected}'")]
+    TypeMismatch {
+        symbol: String,
+        expected: Dtype,
+        actual: Dtype,
+    },
+
     #[error("Initialization of structs not supported")]
     StructInitialization,
 
@@ -14,7 +25,7 @@ pub enum Error {
     },
 
     #[error("Failed to parse module '{module_name}': {message}")]
-    ModuleParseError {
+    ModuleParseFailed {
         module_name: String,
         message: String,
     },
@@ -30,9 +41,6 @@ pub enum Error {
 
     #[error("Conflicted definition of function {symbol}")]
     ConflictedFunction { symbol: String },
-
-    #[error("Symbol missing")]
-    SymbolMissing,
 
     #[error("Mismatched declaration and definition of {symbol}")]
     DeclDefMismatch { symbol: String },
@@ -63,20 +71,14 @@ pub enum Error {
     #[error("Invalid expression unit: {expr_unit}")]
     InvalidExprUnit { expr_unit: ast::ExprUnit },
 
-    #[error("Unsupported local variable definition")]
-    LocalVarDefinitionUnsupported,
-
-    #[error("Unsupported function call")]
-    FunctionCallUnsupported,
-
     #[error("Invalid continue instruction")]
     InvalidContinueInst,
 
     #[error("Invalid break instruction")]
     InvalidBreakInst,
 
-    #[error("Unsupported return type")]
-    ReturnTypeUnsupported,
+    #[error("Function '{symbol}' has unsupported return type '{dtype}'")]
+    UnsupportedReturnType { symbol: String, dtype: Dtype },
 
     #[error("Struct type '{member_type}' used in struct '{struct_name}' is not defined")]
     UndefinedStructMemberType {

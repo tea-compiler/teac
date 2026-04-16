@@ -68,13 +68,13 @@ fn collect_alloca_ptrs(blocks: &[ir::BasicBlock]) -> Result<HashMap<usize, ir::D
     let mut out = HashMap::new();
     for stmt in blocks.iter().flat_map(|block| block.stmts.iter()) {
         if let ir::stmt::StmtInner::Alloca(a) = &stmt.inner {
-            let vreg = a
+            let id = a
                 .dst
-                .vreg_index()
+                .local_id()
                 .ok_or_else(|| Error::UnsupportedOperand {
                     what: format!("alloca destination is not a local variable: {}", a.dst),
                 })?;
-            out.insert(vreg, a.dst.dtype().clone());
+            out.insert(id.0, a.dst.dtype().clone());
         }
     }
     Ok(out)

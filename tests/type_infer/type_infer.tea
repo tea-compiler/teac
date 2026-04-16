@@ -28,6 +28,27 @@ fn sum_range(lo:i32, hi:i32) -> i32 {
     return acc;
 }
 
+fn foo() -> i32 {
+    let a;
+    if 1 > 0 {
+        a = 1 > 0;
+    } else {
+        a = 1;
+    }
+    return a;
+}
+
+fn f2() -> i32 {
+    let a;
+    let b;
+    let c = 1;
+    if c > 0 {
+        b = c + 1;
+    }
+    a = b;
+    return a;
+}
+
 fn main() -> i32 {
     let a = 10;
     let b = 3;
@@ -144,6 +165,11 @@ fn main() -> i32 {
     w = w * w;
     w = w + 1;
     std::putint(w);
+    std::putch(10);
+
+    std::putint(foo());
+    std::putch(32);
+    std::putint(f2());
     std::putch(10);
 
     return 0;

@@ -4,8 +4,7 @@ use super::function_generator::FunctionGenerator;
 use crate::asm::error::Error;
 use crate::ir::function::{BasicBlock, BlockLabel};
 use crate::ir::stmt::{PhiStmt, Stmt, StmtInner};
-use crate::ir::value::LocalVariable;
-use crate::ir::Operand;
+use crate::ir::{Local, LocalId, Operand};
 use crate::opt::cfg::Cfg;
 
 pub fn lower_function_blocks(
@@ -126,10 +125,9 @@ fn emit_parallel_copies(
         }
 
         let cycle_dst = pending[0].dst.clone();
-        let temp = Operand::from(LocalVariable::new(
+        let temp = Operand::from(Local::new(
             cycle_dst.dtype().clone(),
-            ctx.fresh_vreg(),
-            None,
+            LocalId(ctx.fresh_vreg()),
         ));
         ctx.emit_copy(&temp, &cycle_dst)?;
 
@@ -171,9 +169,9 @@ fn next_basic_block_id(labels: &[BlockLabel]) -> usize {
 
 fn same_operand(lhs: &Operand, rhs: &Operand) -> bool {
     match (lhs, rhs) {
-        (Operand::Integer(l), Operand::Integer(r)) => l.value == r.value,
-        (Operand::Local(l), Operand::Local(r)) => l.index == r.index,
-        (Operand::Global(l), Operand::Global(r)) => l.identifier == r.identifier,
+        (Operand::Const(l), Operand::Const(r)) => l.val == r.val,
+        (Operand::Local(l), Operand::Local(r)) => l.id == r.id,
+        (Operand::Global(l), Operand::Global(r)) => l.name == r.name,
         _ => false,
     }
 }

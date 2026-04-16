@@ -13,8 +13,8 @@ pub enum ArithBinOp {
     SDiv,
 }
 
-impl From<ast::ArithBiOp> for ArithBinOp {
-    fn from(value: ast::ArithBiOp) -> Self {
+impl From<&ast::ArithBiOp> for ArithBinOp {
+    fn from(value: &ast::ArithBiOp) -> Self {
         match value {
             ast::ArithBiOp::Add => ArithBinOp::Add,
             ast::ArithBiOp::Sub => ArithBinOp::Sub,
@@ -45,8 +45,8 @@ pub enum CmpPredicate {
     Sle,
 }
 
-impl From<ast::ComOp> for CmpPredicate {
-    fn from(value: ast::ComOp) -> Self {
+impl From<&ast::ComOp> for CmpPredicate {
+    fn from(value: &ast::ComOp) -> Self {
         match value {
             ast::ComOp::Eq => CmpPredicate::Eq,
             ast::ComOp::Ne => CmpPredicate::Ne,
@@ -93,11 +93,17 @@ pub struct Stmt {
 }
 
 /// Describes how an operand is used within a statement.
+///
+/// The pointer-operand variants (`LoadPtr`, `StorePtr`) are split out from
+/// the generic `Use` so that passes like `mem2reg` can distinguish pure
+/// load/store traffic through a pointer — which is promotable — from any
+/// other use of the same value, which would mean the address escapes and
+/// the pointer cannot be promoted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperandRole {
     /// Instruction defines (writes) this value.
     Def,
-    /// General use (read) of a value.
+    /// General read of a value — not a load/store pointer.
     Use,
     /// Pointer operand of a `load` instruction.
     LoadPtr,
@@ -162,10 +168,10 @@ impl Stmt {
         }
     }
 
-    pub fn as_cjump(dst: Operand, true_label: BlockLabel, false_label: BlockLabel) -> Self {
+    pub fn as_cjump(cond: Operand, true_label: BlockLabel, false_label: BlockLabel) -> Self {
         Self {
             inner: StmtInner::CJump(CJumpStmt {
-                dst,
+                cond,
                 true_label,
                 false_label,
             }),
@@ -210,18 +216,18 @@ impl Stmt {
 impl Display for Stmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
-            StmtInner::Alloca(s) => write!(f, "\t{}", s),
-            StmtInner::BiOp(s) => write!(f, "\t{}", s),
-            StmtInner::CJump(s) => write!(f, "\t{}", s),
-            StmtInner::Call(s) => write!(f, "\t{}", s),
-            StmtInner::Cmp(s) => write!(f, "\t{}", s),
-            StmtInner::Gep(s) => write!(f, "\t{}", s),
-            StmtInner::Label(s) => write!(f, "{}", s),
-            StmtInner::Load(s) => write!(f, "\t{}", s),
-            StmtInner::Phi(s) => write!(f, "\t{}", s),
-            StmtInner::Return(s) => write!(f, "\t{}", s),
-            StmtInner::Store(s) => write!(f, "\t{}", s),
-            StmtInner::Jump(s) => write!(f, "\t{}", s),
+            StmtInner::Alloca(s) => write!(f, "\t{s}"),
+            StmtInner::BiOp(s) => write!(f, "\t{s}"),
+            StmtInner::CJump(s) => write!(f, "\t{s}"),
+            StmtInner::Call(s) => write!(f, "\t{s}"),
+            StmtInner::Cmp(s) => write!(f, "\t{s}"),
+            StmtInner::Gep(s) => write!(f, "\t{s}"),
+            StmtInner::Label(s) => write!(f, "{s}"),
+            StmtInner::Load(s) => write!(f, "\t{s}"),
+            StmtInner::Phi(s) => write!(f, "\t{s}"),
+            StmtInner::Return(s) => write!(f, "\t{s}"),
+            StmtInner::Store(s) => write!(f, "\t{s}"),
+            StmtInner::Jump(s) => write!(f, "\t{s}"),
         }
     }
 }
@@ -268,7 +274,7 @@ pub struct CmpStmt {
 
 #[derive(Clone)]
 pub struct CJumpStmt {
-    pub dst: Operand,
+    pub cond: Operand,
     pub true_label: BlockLabel,
     pub false_label: BlockLabel,
 }
@@ -308,110 +314,94 @@ impl Display for CallStmt {
             .iter()
             .map(|a| {
                 if matches!(a.dtype(), Dtype::Pointer { .. } | Dtype::Array { .. }) {
-                    format!("ptr {}", a)
+                    format!("ptr {a}")
                 } else {
-                    format!("{} {}", a.dtype(), a)
+                    format!("{} {a}", a.dtype())
                 }
             })
             .collect::<Vec<_>>()
             .join(", ");
 
+        let func_name = &self.func_name;
         if let Some(res) = &self.res {
-            write!(
-                f,
-                "{} = call {} @{}({})",
-                res,
-                &res.dtype(),
-                self.func_name,
-                args
-            )
+            write!(f, "{res} = call {} @{func_name}({args})", res.dtype())
         } else {
-            write!(f, "call void @{}({})", self.func_name, args)
+            write!(f, "call void @{func_name}({args})")
         }
     }
 }
 
 impl Display for LoadStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} = load {}, ptr {}, align 4",
-            self.dst,
-            self.dst.dtype(),
-            self.ptr
-        )
+        let Self { dst, ptr } = self;
+        write!(f, "{dst} = load {}, ptr {ptr}, align 4", dst.dtype())
     }
 }
 
 impl Display for PhiStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let dtype = self.dst.dtype();
+        let dst = &self.dst;
+        let dtype = dst.dtype();
         let incoming_str = self
             .incomings
             .iter()
-            .map(|(label, val)| format!("[ {}, %{} ]", val, label))
+            .map(|(label, val)| format!("[ {val}, %{label} ]"))
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "{} = phi {} {}", self.dst, dtype, incoming_str)
+        write!(f, "{dst} = phi {dtype} {incoming_str}")
     }
 }
 
 impl Display for StoreStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "store {} {}, ptr {}, align 4",
-            self.src.dtype(),
-            self.src,
-            self.ptr
-        )
+        let Self { src, ptr } = self;
+        write!(f, "store {} {src}, ptr {ptr}, align 4", src.dtype())
     }
 }
 
 impl Display for AllocaStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.dst.dtype() {
-            Dtype::Pointer { pointee } => write!(f, "{} = alloca {}, align 4", self.dst, pointee),
-            _ => write!(f, "{} = alloca {}, align 4", self.dst, self.dst.dtype()),
-        }
+        let dst = &self.dst;
+        let inner = match dst.dtype() {
+            Dtype::Pointer { pointee } => pointee.as_ref().clone(),
+            other => other.clone(),
+        };
+        write!(f, "{dst} = alloca {inner}, align 4")
     }
 }
 
 impl Display for BiOpStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} = {} {} {}, {}",
-            self.dst,
-            self.kind,
-            self.dst.dtype(),
-            self.left,
-            self.right
-        )
+        let Self {
+            kind,
+            left,
+            right,
+            dst,
+        } = self;
+        write!(f, "{dst} = {kind} {} {left}, {right}", dst.dtype())
     }
 }
 
 impl Display for CmpStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} = icmp {} {} {}, {}",
-            self.dst,
-            self.kind,
-            self.left.dtype(),
-            self.left,
-            self.right
-        )
+        let Self {
+            kind,
+            left,
+            right,
+            dst,
+        } = self;
+        write!(f, "{dst} = icmp {kind} {} {left}, {right}", left.dtype())
     }
 }
 
 impl Display for CJumpStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "br i1 {}, label %{}, label %{}",
-            self.dst, &self.true_label, &self.false_label
-        )
+        let Self {
+            cond,
+            true_label,
+            false_label,
+        } = self;
+        write!(f, "br i1 {cond}, label %{true_label}, label %{false_label}")
     }
 }
 
@@ -429,38 +419,35 @@ impl Display for LabelStmt {
 
 impl Display for GepStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.base_ptr.dtype() {
+        let Self {
+            new_ptr,
+            base_ptr,
+            index,
+        } = self;
+        match base_ptr.dtype() {
             Dtype::Pointer { pointee } => match pointee.as_ref() {
                 Dtype::Array {
                     length: Some(_), ..
                 }
                 | Dtype::Struct { .. } => write!(
                     f,
-                    "{} = getelementptr {}, ptr {}, i32 {}, i32 {}",
-                    self.new_ptr, pointee, self.base_ptr, 0, self.index,
+                    "{new_ptr} = getelementptr {pointee}, ptr {base_ptr}, i32 0, i32 {index}",
                 ),
                 Dtype::Array {
                     element,
                     length: None,
                 } => write!(
                     f,
-                    "{} = getelementptr {}, ptr {}, i32 {}",
-                    self.new_ptr, element, self.base_ptr, self.index,
+                    "{new_ptr} = getelementptr {element}, ptr {base_ptr}, i32 {index}",
                 ),
                 _ => write!(
                     f,
-                    "{} = getelementptr {}, ptr {}, i32 {}",
-                    self.new_ptr, pointee, self.base_ptr, self.index,
+                    "{new_ptr} = getelementptr {pointee}, ptr {base_ptr}, i32 {index}",
                 ),
             },
-            Dtype::Array { .. } => write!(
+            dtype @ Dtype::Array { .. } => write!(
                 f,
-                "{} = getelementptr {}, ptr {}, i32 {}, i32 {}",
-                self.new_ptr,
-                self.base_ptr.dtype(),
-                self.base_ptr,
-                0,
-                self.index,
+                "{new_ptr} = getelementptr {dtype}, ptr {base_ptr}, i32 0, i32 {index}",
             ),
             _ => Err(fmt::Error),
         }
@@ -470,7 +457,7 @@ impl Display for GepStmt {
 impl Display for ReturnStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.val {
-            Some(v) => write!(f, "ret {} {}", v.dtype(), v),
+            Some(v) => write!(f, "ret {} {v}", v.dtype()),
             None => write!(f, "ret void"),
         }
     }
@@ -478,120 +465,42 @@ impl Display for ReturnStmt {
 
 impl Stmt {
     pub fn operands(&self) -> Vec<OperandRef<'_>> {
-        use OperandRole::*;
-        let mut ops = Vec::new();
-        match &self.inner {
-            StmtInner::Alloca(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Def,
-                });
-            }
-            StmtInner::Load(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Def,
-                });
-                ops.push(OperandRef {
-                    operand: &s.ptr,
-                    role: LoadPtr,
-                });
-            }
-            StmtInner::Store(s) => {
-                ops.push(OperandRef {
-                    operand: &s.src,
-                    role: Use,
-                });
-                ops.push(OperandRef {
-                    operand: &s.ptr,
-                    role: StorePtr,
-                });
-            }
-            StmtInner::BiOp(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Def,
-                });
-                ops.push(OperandRef {
-                    operand: &s.left,
-                    role: Use,
-                });
-                ops.push(OperandRef {
-                    operand: &s.right,
-                    role: Use,
-                });
-            }
-            StmtInner::Cmp(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Def,
-                });
-                ops.push(OperandRef {
-                    operand: &s.left,
-                    role: Use,
-                });
-                ops.push(OperandRef {
-                    operand: &s.right,
-                    role: Use,
-                });
-            }
-            StmtInner::CJump(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Use,
-                });
-            }
-            StmtInner::Call(s) => {
-                if let Some(res) = &s.res {
-                    ops.push(OperandRef {
-                        operand: res,
-                        role: Def,
-                    });
-                }
-                for arg in &s.args {
-                    ops.push(OperandRef {
-                        operand: arg,
-                        role: Use,
-                    });
-                }
-            }
-            StmtInner::Gep(s) => {
-                ops.push(OperandRef {
-                    operand: &s.new_ptr,
-                    role: Def,
-                });
-                ops.push(OperandRef {
-                    operand: &s.base_ptr,
-                    role: Use,
-                });
-                ops.push(OperandRef {
-                    operand: &s.index,
-                    role: Use,
-                });
-            }
-            StmtInner::Return(s) => {
-                if let Some(val) = &s.val {
-                    ops.push(OperandRef {
-                        operand: val,
-                        role: Use,
-                    });
-                }
-            }
-            StmtInner::Phi(s) => {
-                ops.push(OperandRef {
-                    operand: &s.dst,
-                    role: Def,
-                });
-                for (_, val) in &s.incomings {
-                    ops.push(OperandRef {
-                        operand: val,
-                        role: Use,
-                    });
-                }
-            }
-            StmtInner::Label(_) | StmtInner::Jump(_) => {}
+        use OperandRole::{Def, LoadPtr, StorePtr, Use};
+
+        /// Build an [`OperandRef`] with less visual noise at every call site.
+        fn r(operand: &Operand, role: OperandRole) -> OperandRef<'_> {
+            OperandRef { operand, role }
         }
-        ops
+
+        match &self.inner {
+            StmtInner::Alloca(s) => vec![r(&s.dst, Def)],
+            StmtInner::Load(s) => vec![r(&s.dst, Def), r(&s.ptr, LoadPtr)],
+            StmtInner::Store(s) => vec![r(&s.src, Use), r(&s.ptr, StorePtr)],
+            StmtInner::BiOp(s) => vec![r(&s.dst, Def), r(&s.left, Use), r(&s.right, Use)],
+            StmtInner::Cmp(s) => vec![r(&s.dst, Def), r(&s.left, Use), r(&s.right, Use)],
+            StmtInner::CJump(s) => vec![r(&s.cond, Use)],
+            StmtInner::Call(s) => {
+                let mut ops = Vec::with_capacity(s.args.len() + 1);
+                if let Some(res) = &s.res {
+                    ops.push(r(res, Def));
+                }
+                ops.extend(s.args.iter().map(|a| r(a, Use)));
+                ops
+            }
+            StmtInner::Gep(s) => vec![
+                r(&s.new_ptr, Def),
+                r(&s.base_ptr, Use),
+                r(&s.index, Use),
+            ],
+            StmtInner::Return(s) => s.val.as_ref().map_or_else(Vec::new, |v| vec![r(v, Use)]),
+            StmtInner::Phi(s) => {
+                let mut ops = Vec::with_capacity(s.incomings.len() + 1);
+                ops.push(r(&s.dst, Def));
+                ops.extend(s.incomings.iter().map(|(_, val)| r(val, Use)));
+                ops
+            }
+            StmtInner::Label(_) | StmtInner::Jump(_) => Vec::new(),
+        }
     }
 
     pub fn map_use_operands(&self, f: impl Fn(&Operand) -> Operand) -> Stmt {
@@ -606,7 +515,7 @@ impl Stmt {
                 Stmt::as_cmp(s.kind.clone(), f(&s.left), f(&s.right), s.dst.clone())
             }
             StmtInner::CJump(s) => {
-                Stmt::as_cjump(f(&s.dst), s.true_label.clone(), s.false_label.clone())
+                Stmt::as_cjump(f(&s.cond), s.true_label.clone(), s.false_label.clone())
             }
             StmtInner::Call(s) => {
                 let args = s.args.iter().map(&f).collect();

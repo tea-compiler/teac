@@ -3,7 +3,7 @@
 //! Passes implement the [`FunctionPass`] trait and are composed into a
 //! [`FunctionPassManager`] pipeline that runs them in registration order.
 
-use crate::ir::function::Function;
+use crate::ir::Function;
 
 pub mod cfg;
 mod dominator;
