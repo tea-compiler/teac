@@ -1,0 +1,78 @@
+// type_infer_5 (negative): modular inverse via extended Euclidean
+// algorithm — a real number-theoretic routine with a subtle bug that
+// must be caught by the return-type inference pass.
+//
+// `gcd` and `mul_mod` are helpers with explicit return types, so the
+// baseline accepts them.
+//
+// `modular_inverse(a, m)` is written without an explicit return type.
+// On the happy path it runs the extended Euclidean recurrence in a
+// loop and returns the inverse value `t`. On the failure path (when
+// `gcd(a, m) != 1`, i.e., no inverse exists) the author *intended*
+// to write `return 0 - 1;` to signal "no inverse", but accidentally
+// left a bare `return;`. The conflict is a 1-token bug buried inside
+// ~15 lines of real arithmetic.
+//
+// Constraints collected for `modular_inverse`:
+//     return;              ⟹  [modular_inverse_ret] = void
+//     return t;            ⟹  [modular_inverse_ret] = i32
+//
+// The two returns unify into the same equivalence class; your
+// `UnionFind::union` must detect that the class is being pulled
+// toward two incompatible concrete types (void and i32) and report
+// a type-mismatch error.
+//
+// The current baseline silently accepts this program — it happily
+// registers `modular_inverse` as `-> void` and emits return
+// instructions that ignore `t` on the happy path. Since `main`
+// discards the result (no caller uses `modular_inverse(...)` as a
+// value), the miscompilation would slip through end-to-end testing
+// too; only a real type checker catches it.
+//
+// This program is expected to FAIL compilation.
+
+fn gcd(a: i32, b: i32) -> i32 {
+    if b == 0 {
+        return a;
+    }
+    let rem = a - (a / b) * b;
+    return gcd(b, rem);
+}
+
+fn modular_inverse(a: i32, m: i32) {
+    let g = gcd(a, m);
+    if g != 1 {
+        // Bug: the author meant `return 0 - 1;` here to signal
+        // "no inverse exists", but forgot to supply the value.
+        return;
+    }
+
+    let t = 0;
+    let new_t = 1;
+    let r = m;
+    let new_r = a;
+
+    while new_r != 0 {
+        let q = r / new_r;
+
+        let tmp_t = new_t;
+        new_t = t - q * tmp_t;
+        t = tmp_t;
+
+        let tmp_r = new_r;
+        new_r = r - q * tmp_r;
+        r = tmp_r;
+    }
+
+    if t < 0 {
+        t = t + m;
+    }
+    return t;
+}
+
+fn main() -> i32 {
+    modular_inverse(3, 11);
+    modular_inverse(6, 9);
+    modular_inverse(7, 40);
+    return 0;
+}

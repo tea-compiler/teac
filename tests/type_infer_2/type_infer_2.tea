@@ -1,0 +1,48 @@
+// type_infer_2: exponentiation by squaring.
+//
+// `pow(base, exp)` computes base^exp using O(log exp) multiplications
+// by splitting `exp` into halves. Neither `square` nor `pow` has an
+// explicit return type.
+//
+// Inference challenges exercised:
+//
+//   * self-recursion: `pow` calls `pow(base, exp / 2)` inside its own
+//     body, so the call site must be typable while `pow`'s return
+//     type is still an unresolved type variable
+//   * cross-function inference: `pow` uses `square(half)` on two
+//     different code paths, so `[square_ret]` must be resolved before
+//     `pow`'s solver finishes
+//   * multiple locals and multiple return paths contributing
+//     independent constraints to the same [pow_ret] equivalence class
+use std;
+
+fn square(x: i32) {
+    return x * x;
+}
+
+fn pow(base: i32, exp: i32) {
+    if exp == 0 {
+        return 1;
+    }
+    if exp == 1 {
+        return base;
+    }
+    let half = pow(base, exp / 2);
+    let rest = exp - (exp / 2) * 2;
+    if rest == 1 {
+        return square(half) * base;
+    }
+    return square(half);
+}
+
+fn main() -> i32 {
+    std::putint(pow(2, 0));
+    std::putch(32);
+    std::putint(pow(2, 10));
+    std::putch(32);
+    std::putint(pow(3, 5));
+    std::putch(32);
+    std::putint(pow(5, 3));
+    std::putch(10);
+    return 0;
+}

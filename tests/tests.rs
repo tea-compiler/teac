@@ -640,6 +640,49 @@ fn test_ast_parse(test_name: &str, must_contain: &[&str]) {
     }
 }
 
+/// Runs a negative compilation test: asserts that `teac` **fails** to
+/// compile `tests/<test_name>/<test_name>.tea` and that the error output
+/// is non-empty.
+///
+/// Used for tests that exercise the compiler's ability to detect a
+/// specific kind of type error. We intentionally do not require the
+/// error message to match a particular string so that students have
+/// freedom in how they phrase their diagnostics; we only verify that
+/// (1) the compiler rejects the input, and (2) it says something about
+/// why.
+fn test_compile_error(test_name: &str) {
+    let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let case_dir = base_dir.join(test_name);
+    let tea = case_dir.join(format!("{test_name}.tea"));
+    assert!(
+        tea.is_file(),
+        "✗ {test_name}: Test file not found at {}",
+        tea.display()
+    );
+
+    let tool = Path::new(env!("CARGO_BIN_EXE_teac"));
+    let output = Command::new(tool)
+        .arg(&tea)
+        .arg("--emit")
+        .arg("ir")
+        .output()
+        .expect("Failed to execute teac");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "✗ Expected compilation to fail for {test_name}, but it succeeded.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "✗ Compilation failed for {test_name} as expected, but no error message \
+         was produced on stderr. The student's implementation should print a \
+         diagnostic explaining what is wrong."
+    );
+}
+
 /// Runs a full compile-link-execute test for `test_name`.
 ///
 /// Expected directory layout under `tests/<test_name>/`:
@@ -948,9 +991,34 @@ fn unique_path() {
     test_single("unique_path");
 }
 #[test]
-fn type_infer() {
+fn type_infer_basic() {
     ensure_std();
-    test_single("type_infer");
+    test_single("type_infer_basic");
+}
+#[test]
+fn type_infer_1() {
+    ensure_std();
+    test_single("type_infer_1");
+}
+#[test]
+fn type_infer_2() {
+    ensure_std();
+    test_single("type_infer_2");
+}
+#[test]
+fn type_infer_3() {
+    ensure_std();
+    test_single("type_infer_3");
+}
+#[test]
+fn type_infer_4() {
+    ensure_std();
+    test_single("type_infer_4");
+}
+#[test]
+fn type_infer_5() {
+    // Negative test: compilation must fail (no linking/running needed).
+    test_compile_error("type_infer_5");
 }
 // ── AST parse-only tests ─────────────────────────────────────────────────────
 // These tests only verify that teac can parse the source file and produce a

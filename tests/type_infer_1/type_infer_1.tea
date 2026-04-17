@@ -1,0 +1,70 @@
+// type_infer_1: a mini-module of four interrelated arithmetic helpers,
+// none of which writes an explicit return type. Each helper is defined
+// in terms of the ones above it, so inference must proceed in source
+// order and every `return_dtype` type variable must be resolved before
+// the next helper uses it.
+//
+// Inference challenges exercised:
+//
+//   * Linear cross-function dependency chain:
+//         abs, max, min  →  clamp  →  clamp_positive
+//   * Multi-branch return unification inside each helper (every
+//     function has ≥2 return sites across if/else)
+//   * Using an inferred-return call as an argument of another
+//     inferred-return call, nested three levels deep in `clamp`:
+//         max(lo, min(hi, x))
+//   * A caller that folds several inferred-return calls together in
+//     arithmetic: `clamp_positive(x, hi) - clamp_positive(y, hi) * 2`
+use std;
+
+fn abs(x: i32) {
+    if x < 0 {
+        return 0 - x;
+    }
+    return x;
+}
+
+fn max(a: i32, b: i32) {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn min(a: i32, b: i32) {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn clamp(x: i32, lo: i32, hi: i32) {
+    return max(lo, min(hi, x));
+}
+
+fn clamp_positive(x: i32, hi: i32) {
+    return clamp(abs(x), 0, hi);
+}
+
+fn main() -> i32 {
+    std::putint(clamp(5, 0, 10));
+    std::putch(32);
+    std::putint(clamp(15, 0, 10));
+    std::putch(32);
+    std::putint(clamp(0 - 3, 0, 10));
+    std::putch(10);
+
+    std::putint(clamp_positive(0 - 7, 20));
+    std::putch(32);
+    std::putint(clamp_positive(42, 20));
+    std::putch(32);
+    std::putint(clamp_positive(3, 20));
+    std::putch(10);
+
+    let a = clamp_positive(0 - 100, 50);
+    let b = clamp_positive(25, 50);
+    std::putint(a - b * 2);
+    std::putch(10);
+
+    return 0;
+}
