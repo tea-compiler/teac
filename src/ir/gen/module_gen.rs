@@ -64,6 +64,18 @@ impl Generator for IrGenerator<'_> {
             }
         }
 
+        // Pass 2.5: run every module-level plug-in pass registered by
+        // the driver.  We `mem::take` the pipeline out so the pass can
+        // receive `&mut self` without aliasing the list that dispatched
+        // it — the generator's `module_passes` field is empty for the
+        // duration of the loop and gets restored on exit.
+        {
+            let passes = std::mem::take(&mut self.module_passes);
+            let result = passes.run(self);
+            self.module_passes = passes;
+            result?;
+        }
+
         // Pass 3: generate IR bodies for every function definition.
         for elem in &input.elements {
             if let ast::ProgramElementInner::FnDef(fn_def) = &elem.inner {
@@ -117,51 +129,12 @@ impl Generator for IrGenerator<'_> {
 
     /// Emit the complete IR module to the provided writer in textual form.
     ///
-    /// The output is structured as follows:
-    /// 1. **Header** — target triple and data-layout string.
-    /// 2. **Struct type definitions** — one line per registered struct type.
-    /// 3. **Global variables** — all global variable declarations/definitions.
-    /// 4. **Functions** — for each function, either a full definition (if a
-    ///    body is present) or an external declaration (if body is absent).
+    /// Delegates to [`IrPrinter::emit_module`] — the same helper used by
+    /// [`crate::opt::Optimizer::output`] — so that pre-optimization and
+    /// post-optimization IR dumps share one code path and one canonical
+    /// format.
     fn output<W: Write>(&self, w: &mut W) -> Result<(), Error> {
-        let mut printer = IrPrinter::new(w);
-
-        // Emit the LLVM-style target triple and data layout header.
-        printer.emit_header(Self::TARGET_TRIPLE, Self::TARGET_DATALAYOUT)?;
-
-        // Emit all struct type definitions collected during IR generation.
-        for (name, st) in &self.registry.struct_types {
-            printer.emit_struct_type(name, st)?;
-        }
-        printer.emit_newline()?;
-
-        // Emit all global variable declarations and definitions.
-        for (name, def) in &self.module.global_list {
-            printer.emit_global(name, def)?;
-        }
-        printer.emit_newline()?;
-
-        // Emit each function — as a definition if it has a body, or as an
-        // external declaration otherwise.
-        for func in self.module.function_list.values() {
-            let func_type = self
-                .registry
-                .function_types
-                .get(&func.identifier)
-                .ok_or_else(|| Error::FunctionNotDefined {
-                    symbol: func.identifier.clone(),
-                })?;
-            match &func.body {
-                Some(body) => {
-                    printer.emit_function_def(&func.identifier, &func_type.return_dtype, body)?;
-                }
-                None => {
-                    printer.emit_function_decl(&func.identifier, func_type)?;
-                }
-            }
-        }
-
-        Ok(())
+        IrPrinter::new(w).emit_module(&self.module, &self.registry)
     }
 }
 

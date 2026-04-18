@@ -178,7 +178,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Variable declaration (no initializer) --------------------------------
+    // -----------------------------------------------------------------------
+    // Variable declaration (no initializer)
+    // -----------------------------------------------------------------------
 
     /// R1 (`let x: T;`) and R4 (`let x;`).
     fn process_var_decl(&mut self, decl: &ast::VarDecl) {
@@ -201,7 +203,9 @@ impl TypeInference<'_> {
         self.env.insert(id.clone(), state);
     }
 
-    // -- Variable definition (with initializer) -------------------------------
+    // -----------------------------------------------------------------------
+    // Variable definition (with initializer)
+    // -----------------------------------------------------------------------
 
     /// R2 (`let x: T = e;`) and R3 (`let x = e;`).
     fn process_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
@@ -249,7 +253,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Assignment -----------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Assignment
+    // -----------------------------------------------------------------------
 
     /// R5 / R6: `x = e;` — resolve a Pending local to typeOf(e), or check
     /// type compatibility against an already-Resolved local.
@@ -283,7 +289,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Branching (if/else) --------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Branching (if/else)
+    // -----------------------------------------------------------------------
 
     /// R7: if/else merging.
     fn process_if(&mut self, stmt: &ast::IfStmt) -> Result<(), Error> {
@@ -305,7 +313,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Loops ----------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Loops
+    // -----------------------------------------------------------------------
 
     /// R8: while merging.
     fn process_while(&mut self, stmt: &ast::WhileStmt) -> Result<(), Error> {
@@ -319,7 +329,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Return ---------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Return
+    // -----------------------------------------------------------------------
 
     fn process_return(&mut self, stmt: &ast::ReturnStmt) -> Result<(), Error> {
         if let Some(val) = &stmt.val {
@@ -328,7 +340,9 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -- Environment merging --------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Environment merging
+    // -----------------------------------------------------------------------
 
     /// Merge two branch environments back into `self.env`.
     ///
@@ -584,7 +598,9 @@ impl TypeInference<'_> {
         Ok(Self::element_type_of_indexing(&arr_type))
     }
 
-    // -- Boolean expression checking (just validates sub-expressions) ----------
+    // -----------------------------------------------------------------------
+    // Boolean expression checking (just validates sub-expressions)
+    // -----------------------------------------------------------------------
 
     fn check_bool_expr(&self, expr: &ast::BoolExpr) -> Result<(), Error> {
         match &expr.inner {
@@ -608,7 +624,9 @@ impl TypeInference<'_> {
         }
     }
 
-    // -- Type compatibility check ---------------------------------------------
+    // -----------------------------------------------------------------------
+    // Type compatibility check
+    // -----------------------------------------------------------------------
 
     fn check_compatible(symbol: &str, expected: &Dtype, actual: &Dtype) -> Result<(), Error> {
         if expected == actual {

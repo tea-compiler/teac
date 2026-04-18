@@ -2,6 +2,7 @@
 //! including target platform detection and a generic code generator trait.
 
 pub mod graph;
+pub mod pass;
 
 use std::io::Write;
 

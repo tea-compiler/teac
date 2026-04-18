@@ -37,32 +37,7 @@ jobs:
 
     - name: Run basic tests
       run: |
-        cargo test --verbose -- \
-          --skip float_basic \
-          --skip float_arith \
-          --skip float_cmp \
-          --skip float_cast \
-          --skip float_func \
-          --skip for_basic \
-          --skip for_continue \
-          --skip for_mixed \
-          --skip for_nested \
-          --skip for_range \
-          --skip struct_method_basic \
-          --skip struct_method_calls \
-          --skip struct_method_namespace \
-          --skip struct_method_loop \
-          --skip struct_method_nested \
-          --skip array_2d_basic \
-          --skip array_2d_init \
-          --skip array_2d_matmul \
-          --skip array_3d \
-          --skip array_attention \
-          --skip type_infer_1 \
-          --skip type_infer_2 \
-          --skip type_infer_3 \
-          --skip type_infer_4 \
-          --skip type_infer_5
+        cargo test --verbose
 
   doc:
     runs-on: ubuntu-latest

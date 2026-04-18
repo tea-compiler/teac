@@ -1,8 +1,21 @@
 use super::error::Error;
 use super::function::FunctionBody;
+use super::module::{Module, Registry};
 use super::types::{Dtype, FunctionType, StructType};
 use super::value::GlobalDef;
 use std::io::Write;
+
+/// LLVM-style target triple baked into every IR dump.  Kept alongside
+/// the printer rather than on `IrGenerator` because the printer is the
+/// component that actually writes it, and `Optimizer::output` now needs
+/// the same constant — making it a free constant in `ir::printer`
+/// avoids introducing an `ir::gen`-to-`opt` dependency.
+pub const TARGET_TRIPLE: &str = "aarch64-unknown-linux-gnu";
+
+/// Matching datalayout string.  See [`TARGET_TRIPLE`] for why it lives
+/// here.
+pub const TARGET_DATALAYOUT: &str =
+    "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128";
 
 pub struct IrPrinter<W: Write> {
     writer: W,
@@ -11,6 +24,45 @@ pub struct IrPrinter<W: Write> {
 impl<W: Write> IrPrinter<W> {
     pub fn new(writer: W) -> Self {
         Self { writer }
+    }
+
+    /// Emit a complete IR dump for `module` (with its companion
+    /// `registry`) in teac's canonical format: header, struct types,
+    /// globals, then every function as either a definition or a
+    /// declaration.
+    ///
+    /// This is the single source of truth for "what does a teac IR
+    /// file look like", shared by [`crate::ir::IrGenerator::output`]
+    /// and [`crate::opt::Optimizer::output`].
+    pub fn emit_module(&mut self, module: &Module, registry: &Registry) -> Result<(), Error> {
+        self.emit_header(TARGET_TRIPLE, TARGET_DATALAYOUT)?;
+
+        for (name, st) in &registry.struct_types {
+            self.emit_struct_type(name, st)?;
+        }
+        self.emit_newline()?;
+
+        for (name, def) in &module.global_list {
+            self.emit_global(name, def)?;
+        }
+        self.emit_newline()?;
+
+        for func in module.function_list.values() {
+            let func_type = registry
+                .function_types
+                .get(&func.identifier)
+                .ok_or_else(|| Error::FunctionNotDefined {
+                    symbol: func.identifier.clone(),
+                })?;
+            match &func.body {
+                Some(body) => {
+                    self.emit_function_def(&func.identifier, &func_type.return_dtype, body)?
+                }
+                None => self.emit_function_decl(&func.identifier, func_type)?,
+            }
+        }
+
+        Ok(())
     }
 
     pub fn emit_header(&mut self, target_triple: &str, datalayout: &str) -> Result<(), Error> {

@@ -1,13 +1,14 @@
 //! `teac` – the TeaLang compiler driver.
 //!
 //! This binary ties together all compiler stages in order:
-//! parsing → IR generation → optimisation → assembly emission.
+//! parsing → IR generation → optimization → assembly emission.
 //! The output stage can be stopped early (via `--emit`) to inspect
 //! the AST, IR, or final AArch64 assembly.
 
 mod asm;
 mod ast;
 mod common;
+mod experimental;
 mod ir;
 mod opt;
 mod parser;
@@ -27,7 +28,7 @@ use std::{
 enum EmitTarget {
     /// Stop after parsing and emit the Abstract Syntax Tree.
     Ast,
-    /// Stop after IR generation and optimisation and emit the IR.
+    /// Stop after IR generation and optimization and emit the IR.
     Ir,
     /// Run all stages and emit the final AArch64 assembly (default).
     Asm,
@@ -98,7 +99,7 @@ fn open_writer(output: &Option<String>) -> Result<Box<dyn Write>> {
 /// 1. Parse CLI arguments and read the source file.
 /// 2. Parse the source into an AST; exit here if `--emit ast`.
 /// 3. Lower the AST to IR.
-/// 4. Run the default optimisation pass pipeline over every function.
+/// 4. Run the default optimization pass pipeline over every function.
 ///    Exit here if `--emit ir`.
 /// 5. Generate AArch64 assembly for the requested target platform
 ///    and write it to the output.
@@ -136,20 +137,28 @@ fn run() -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut ir_gen = ir::IrGenerator::new(ast, source_dir);
+    let mut ir_gen = ir::IrGenerator::with_default_passes(ast, source_dir);
     ir_gen.generate().context("failed to generate IR")?;
 
-    // Run the default optimisation passes over every function in the module.
-    let pass_manager = opt::FunctionPassManager::with_default_pipeline();
-    for func in ir_gen.module.function_list.values_mut() {
-        pass_manager.run(func);
-    }
+    // Optimization stage: run the default function-pass pipeline over
+    // the freshly generated IR. `Optimizer::with_default_passes` takes
+    // `&mut ir_gen.module`, and the assembly generator below needs to
+    // reborrow the module immutably. Confining the optimizer to its own
+    // scope forces Rust to drop that mutable borrow before the asm stage
+    // starts.
+    {
+        let mut optimizer =
+            opt::Optimizer::with_default_passes(&mut ir_gen.module, &ir_gen.registry);
+        optimizer
+            .generate()
+            .context("failed to run optimization passes")?;
 
-    // Early exit: the user only wants the (optimised) IR dump.
-    if cli.emit == EmitTarget::Ir {
-        return ir_gen
-            .output(&mut writer)
-            .context("failed to write IR output");
+        // Early exit: the user only wants the (optimized) IR dump.
+        if cli.emit == EmitTarget::Ir {
+            return optimizer
+                .output(&mut writer)
+                .context("failed to write IR output");
+        }
     }
 
     // Resolve the target platform: use the explicit flag, or auto-detect the host.

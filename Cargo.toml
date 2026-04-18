@@ -3,6 +3,14 @@ name = "teac"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+return-type-inference = []
+float = []
+for-loop = []
+struct-method = []
+multi-dim-array = []
+
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.41", features = ["derive"] }

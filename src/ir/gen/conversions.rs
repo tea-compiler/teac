@@ -43,7 +43,10 @@ pub(crate) fn compose_var_def_dtype(base: Dtype, inner: &ast::VarDefInner) -> Dt
     }
 }
 
-// --- `From` trait implementations: AST TypeSpecifier -> IR Dtype ---
+// ---------------------------------------------------------------------------
+// `From` trait implementations: AST TypeSpecifier -> IR Dtype
+// ---------------------------------------------------------------------------
+//
 // These provide infallible conversions from AST type specifiers to IR types.
 
 /// Converts an owned `ast::TypeSpecifier` into a `Dtype` by delegating to the
@@ -75,7 +78,10 @@ impl From<&ast::TypeSpecifier> for Dtype {
     }
 }
 
-// --- `TryFrom` trait implementations: AST declarations -> IR Dtype ---
+// ---------------------------------------------------------------------------
+// `TryFrom` trait implementations: AST declarations -> IR Dtype
+// ---------------------------------------------------------------------------
+//
 // These are fallible conversions because certain combinations (e.g., struct
 // definitions with initializers) are not supported and produce an error.
 
