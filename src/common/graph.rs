@@ -3,10 +3,14 @@
 //! This module provides:
 //! - [`CfgNode`]: a trait for nodes in a control-flow graph.
 //! - [`Graph`]: a directed graph with successor and predecessor adjacency lists.
-//! - [`Lattice`]: a trait defining a lattice for dataflow analysis.
-//! - [`BackwardLiveness`]: backward liveness analysis using a worklist algorithm.
+//! - [`Lattice`]: a trait defining a lattice for dataflow analysis, implemented
+//!   for both [`bool`] (cheap per-variable analyses such as phi placement) and
+//!   [`Bitset`] (large dense live sets used by the register allocator).
+//! - [`BackwardLiveness`]: backward liveness analysis using a worklist
+//!   algorithm, generic over any [`Lattice`] type.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use super::bitset::Bitset;
+use std::collections::{HashMap, VecDeque};
 
 /// A node in a control-flow graph (CFG).
 ///
@@ -107,71 +111,73 @@ impl Graph {
 /// A lattice used as the value domain for dataflow analysis.
 ///
 /// Each implementor defines:
-/// - a bottom element (the initial / most-conservative value),
+/// - a reset-to-bottom operation that brings the value to the most
+///   conservative element while preserving any size context (e.g., a bit
+///   set's capacity),
 /// - a join (least upper bound) operation for merging values at join points,
-/// - a transfer function that computes the inflow from the outflow using
-///   gen/kill sets.
+/// - a transfer function that updates the value in place to `gen ∪ (out ∖ kill)`.
+///
+/// All in-place operations return whether the value actually changed so the
+/// worklist algorithm can detect convergence without extra equality checks.
 pub trait Lattice: Clone + PartialEq {
-    /// Returns the bottom element of the lattice (the initial dataflow value).
-    fn bottom() -> Self;
+    /// Resets `self` to the bottom element while preserving any internal
+    /// size context (e.g., a [`Bitset`]'s capacity).
+    fn reset(&mut self);
 
-    /// Computes the least upper bound of `self` and `other` in place (join / merge).
-    fn join(&mut self, other: &Self);
+    /// In-place least upper bound: `self ⊔= other`.  Returns `true` if
+    /// `self` changed.
+    fn join(&mut self, other: &Self) -> bool;
 
-    /// Applies the transfer function: `gen ∪ (out ∖ kill)`.
-    ///
-    /// Returns the lattice value that flows into a node given
-    /// - `gen`: values generated (defined / used) by the node,
-    /// - `kill`: values killed (overwritten) by the node,
-    /// - `out`: values live at the exit of the node.
-    fn transfer(gen: &Self, kill: &Self, out: &Self) -> Self;
+    /// In-place transfer function: `self = gen ∪ (out ∖ kill)`.  Returns
+    /// `true` if `self` changed.
+    fn transfer(&mut self, gen: &Self, kill: &Self, out: &Self) -> bool;
 }
 
-/// Simple single-bit reachability lattice.
+/// Single-bit reachability lattice used for per-variable phi placement.
 ///
-/// `false` is the bottom element. `join` is logical OR. The transfer function
-/// propagates liveness if the value is generated or passes through (live-out
-/// and not killed).
+/// `false` is the bottom element; `join` is logical OR; the transfer function
+/// is `gen ∨ (out ∧ ¬kill)`.
 impl Lattice for bool {
-    fn bottom() -> Self {
-        false
+    fn reset(&mut self) {
+        *self = false;
     }
 
-    fn join(&mut self, other: &Self) {
-        *self = *self || *other;
+    fn join(&mut self, other: &Self) -> bool {
+        if *other && !*self {
+            *self = true;
+            true
+        } else {
+            false
+        }
     }
 
-    fn transfer(gen: &Self, kill: &Self, out: &Self) -> Self {
-        *gen || (*out && !*kill)
+    fn transfer(&mut self, gen: &Self, kill: &Self, out: &Self) -> bool {
+        let new = *gen || (*out && !*kill);
+        if new != *self {
+            *self = new;
+            true
+        } else {
+            false
+        }
     }
 }
 
-/// A set of virtual-register indices, used as the liveness lattice element
-/// when tracking the live set of virtual registers.
-#[derive(Clone, PartialEq, Eq)]
-pub struct VregSet(pub HashSet<usize>);
-
-/// Set-of-virtual-registers liveness lattice.
+/// Bit-set lattice over a dense index domain (e.g., virtual registers).
 ///
-/// The bottom element is the empty set. `join` is set union. The transfer
-/// function is `gen ∪ (out ∖ kill)`.
-impl Lattice for VregSet {
-    fn bottom() -> Self {
-        VregSet(HashSet::new())
+/// `Bitset::new(capacity)` is the bottom element; `join` is word-parallel
+/// union; the transfer function is `gen | (out & !kill)` computed word by
+/// word.  All operations require both operands to share the same capacity.
+impl Lattice for Bitset {
+    fn reset(&mut self) {
+        self.clear();
     }
 
-    fn join(&mut self, other: &Self) {
-        self.0.extend(other.0.iter().copied());
+    fn join(&mut self, other: &Self) -> bool {
+        self.union_with(other)
     }
 
-    fn transfer(gen: &Self, kill: &Self, out: &Self) -> Self {
-        let mut result = gen.0.clone();
-        for v in &out.0 {
-            if !kill.0.contains(v) {
-                result.insert(*v);
-            }
-        }
-        VregSet(result)
+    fn transfer(&mut self, gen: &Self, kill: &Self, out: &Self) -> bool {
+        self.assign_transfer(gen, kill, out)
     }
 }
 
@@ -189,41 +195,45 @@ pub struct BackwardLiveness<L> {
 impl<L: Lattice> BackwardLiveness<L> {
     /// Performs backward liveness analysis using a worklist algorithm.
     ///
+    /// `bottom` supplies the initial value at every node; it must already be
+    /// at the lattice's bottom element and carry any required size context
+    /// (e.g., a [`Bitset`]'s capacity).
+    ///
     /// The worklist is initially seeded with all nodes in reverse order so
-    /// that nodes near the end of the CFG are processed first. Whenever
+    /// that nodes near the end of the CFG are processed first.  Whenever
     /// `live_in[i]` changes, all predecessors of `i` are added back to the
-    /// worklist to propagate the change backward until a fixed point is reached.
-    pub fn compute(gen: &[L], kill: &[L], graph: &Graph) -> Self {
+    /// worklist to propagate the change backward until a fixed point is
+    /// reached.
+    pub fn compute(gen: &[L], kill: &[L], graph: &Graph, bottom: L) -> Self {
         let n = graph.num_nodes();
+        debug_assert_eq!(gen.len(), n);
+        debug_assert_eq!(kill.len(), n);
 
-        let mut live_in: Vec<L> = (0..n).map(|_| L::bottom()).collect();
-        let mut live_out: Vec<L> = (0..n).map(|_| L::bottom()).collect();
+        let mut live_in: Vec<L> = vec![bottom.clone(); n];
+        let mut live_out: Vec<L> = vec![bottom.clone(); n];
 
         let mut in_worklist = vec![true; n];
         let mut worklist: VecDeque<usize> = (0..n).rev().collect();
+        let mut new_out = bottom;
 
         while let Some(i) = worklist.pop_front() {
             in_worklist[i] = false;
 
-            let mut new_out = L::bottom();
+            new_out.reset();
             for &s in graph.successors(i) {
                 new_out.join(&live_in[s]);
             }
 
-            let new_in = L::transfer(&gen[i], &kill[i], &new_out);
+            let in_changed = live_in[i].transfer(&gen[i], &kill[i], &new_out);
+            std::mem::swap(&mut live_out[i], &mut new_out);
 
-            if new_in != live_in[i] {
-                live_in[i] = new_in;
-                live_out[i] = new_out;
-
+            if in_changed {
                 for &p in graph.predecessors(i) {
                     if !in_worklist[p] {
                         in_worklist[p] = true;
                         worklist.push_back(p);
                     }
                 }
-            } else {
-                live_out[i] = new_out;
             }
         }
 

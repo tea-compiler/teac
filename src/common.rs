@@ -1,6 +1,7 @@
 //! Common utilities and shared abstractions used across the compiler,
 //! including target platform detection and a generic code generator trait.
 
+pub mod bitset;
 pub mod graph;
 pub mod pass;
 

@@ -4,7 +4,8 @@ use super::inst::Inst;
 use super::types::{Addr, IndexOperand, Operand, RegSize, Register};
 use crate::asm::common::StackFrame;
 use crate::asm::error::Error;
-use crate::common::graph::{BackwardLiveness, Graph, VregSet};
+use crate::common::bitset::Bitset;
+use crate::common::graph::{BackwardLiveness, Graph};
 
 const NUM_COLORS: usize = 8;
 const ALLOCATABLE_REGS: [u8; NUM_COLORS] = [8, 9, 10, 11, 12, 13, 14, 15];
@@ -23,17 +24,15 @@ pub fn allocate(instructions: &[Inst]) -> AllocationResult {
         return AllocationResult::empty();
     }
 
+    let num_vregs = max_vreg_index(instructions).map_or(0, |m| m + 1);
+    if num_vregs == 0 {
+        return AllocationResult::empty();
+    }
+
     let cfg = Graph::from_nodes(instructions);
-    let gen: Vec<VregSet> = instructions
-        .iter()
-        .map(|i| VregSet(i.used_vregs()))
-        .collect();
-    let kill: Vec<VregSet> = instructions
-        .iter()
-        .map(|i| VregSet(i.defined_vregs()))
-        .collect();
-    let liveness = BackwardLiveness::<VregSet>::compute(&gen, &kill, &cfg);
-    let mut graph = InterferenceGraph::build(instructions, &liveness);
+    let (gen, kill, present) = build_gen_kill(instructions, num_vregs);
+    let liveness = BackwardLiveness::compute(&gen, &kill, &cfg, Bitset::new(num_vregs));
+    let mut graph = InterferenceGraph::build(instructions, &liveness, &present, num_vregs);
     graph.color()
 }
 
@@ -48,48 +47,78 @@ pub fn rewrite_insts(
     Ok(rewriter.into_output())
 }
 
+fn max_vreg_index(instructions: &[Inst]) -> Option<usize> {
+    instructions
+        .iter()
+        .flat_map(|inst| inst.used_vregs().into_iter().chain(inst.defined_vregs()))
+        .max()
+}
+
+fn build_gen_kill(instructions: &[Inst], num_vregs: usize) -> (Vec<Bitset>, Vec<Bitset>, Bitset) {
+    let n = instructions.len();
+    let mut gen = Vec::with_capacity(n);
+    let mut kill = Vec::with_capacity(n);
+    let mut present = Bitset::new(num_vregs);
+
+    for inst in instructions {
+        let mut g = Bitset::new(num_vregs);
+        for v in inst.used_vregs() {
+            g.insert(v);
+            present.insert(v);
+        }
+        let mut k = Bitset::new(num_vregs);
+        for v in inst.defined_vregs() {
+            k.insert(v);
+            present.insert(v);
+        }
+        gen.push(g);
+        kill.push(k);
+    }
+
+    (gen, kill, present)
+}
+
 struct InterferenceGraph {
-    nodes: HashSet<usize>,
-    adjacency: HashMap<usize, HashSet<usize>>,
+    /// Bit set of vregs that appear anywhere in the instruction stream.
+    present: Bitset,
+    /// `adjacency[v]` is the bit set of vregs that interfere with `v`.
+    adjacency: Vec<Bitset>,
 }
 
 impl InterferenceGraph {
-    fn build(instructions: &[Inst], liveness: &BackwardLiveness<VregSet>) -> Self {
-        let nodes: HashSet<usize> = instructions
-            .iter()
-            .flat_map(|inst| inst.used_vregs().into_iter().chain(inst.defined_vregs()))
-            .collect();
-
-        if nodes.is_empty() {
-            return Self {
-                nodes,
-                adjacency: HashMap::new(),
-            };
-        }
-
-        let mut adjacency: HashMap<usize, HashSet<usize>> =
-            nodes.iter().map(|&v| (v, HashSet::new())).collect();
+    fn build(
+        instructions: &[Inst],
+        liveness: &BackwardLiveness<Bitset>,
+        present: &Bitset,
+        num_vregs: usize,
+    ) -> Self {
+        let mut adjacency: Vec<Bitset> = (0..num_vregs).map(|_| Bitset::new(num_vregs)).collect();
 
         for (i, inst) in instructions.iter().enumerate() {
+            let live_out = &liveness.live_out[i];
             for d in inst.defined_vregs() {
-                for &r in &liveness.live_out[i].0 {
-                    if d != r {
-                        adjacency.entry(d).or_default().insert(r);
-                        adjacency.entry(r).or_default().insert(d);
+                adjacency[d].union_with(live_out);
+                adjacency[d].remove(d);
+                for r in live_out.iter() {
+                    if r != d {
+                        adjacency[r].insert(d);
                     }
                 }
             }
         }
 
-        Self { nodes, adjacency }
+        Self {
+            present: present.clone(),
+            adjacency,
+        }
     }
 
     fn degree(&self, v: usize) -> usize {
-        self.adjacency.get(&v).map(|s| s.len()).unwrap_or(0)
+        self.adjacency[v].len()
     }
 
     fn color(&mut self) -> AllocationResult {
-        if self.nodes.is_empty() {
+        if self.present.is_empty() {
             return AllocationResult::empty();
         }
 
@@ -98,22 +127,25 @@ impl InterferenceGraph {
     }
 
     fn simplify(&mut self) -> (Vec<usize>, HashSet<usize>) {
-        let mut degree: HashMap<usize, usize> =
-            self.nodes.iter().map(|&v| (v, self.degree(v))).collect();
+        let n = self.adjacency.len();
+        let total_nodes = self.present.len();
 
-        let mut low_degree: VecDeque<usize> = self
-            .nodes
-            .iter()
-            .copied()
-            .filter(|v| degree[v] < NUM_COLORS)
-            .collect();
-        let mut in_low: HashSet<usize> = low_degree.iter().copied().collect();
+        let mut degree: Vec<usize> = (0..n).map(|v| self.degree(v)).collect();
+        let mut removed = Bitset::new(n);
+        let mut in_low = Bitset::new(n);
 
-        let mut removed: HashSet<usize> = HashSet::new();
-        let mut stack: Vec<usize> = Vec::with_capacity(self.nodes.len());
+        let mut low_degree: VecDeque<usize> = VecDeque::new();
+        for v in self.present.iter() {
+            if degree[v] < NUM_COLORS {
+                low_degree.push_back(v);
+                in_low.insert(v);
+            }
+        }
+
+        let mut stack: Vec<usize> = Vec::with_capacity(total_nodes);
         let mut potential_spills: HashSet<usize> = HashSet::new();
 
-        while stack.len() < self.nodes.len() {
+        while stack.len() < total_nodes {
             let pick = self.pick_node(
                 &mut low_degree,
                 &mut in_low,
@@ -125,19 +157,15 @@ impl InterferenceGraph {
             removed.insert(pick);
             stack.push(pick);
 
-            if let Some(neighbors) = self.adjacency.get(&pick) {
-                for &u in neighbors {
-                    if removed.contains(&u) {
-                        continue;
-                    }
-                    if let Some(d) = degree.get_mut(&u) {
-                        if *d > 0 {
-                            *d -= 1;
-                            if *d < NUM_COLORS && !in_low.contains(&u) {
-                                low_degree.push_back(u);
-                                in_low.insert(u);
-                            }
-                        }
+            for u in self.adjacency[pick].iter() {
+                if removed.contains(u) {
+                    continue;
+                }
+                if degree[u] > 0 {
+                    degree[u] -= 1;
+                    if degree[u] < NUM_COLORS && !in_low.contains(u) {
+                        low_degree.push_back(u);
+                        in_low.insert(u);
                     }
                 }
             }
@@ -149,24 +177,23 @@ impl InterferenceGraph {
     fn pick_node(
         &self,
         low_degree: &mut VecDeque<usize>,
-        in_low: &mut HashSet<usize>,
-        removed: &HashSet<usize>,
-        degree: &HashMap<usize, usize>,
+        in_low: &mut Bitset,
+        removed: &Bitset,
+        degree: &[usize],
         potential_spills: &mut HashSet<usize>,
     ) -> usize {
         while let Some(v) = low_degree.pop_front() {
-            in_low.remove(&v);
-            if !removed.contains(&v) {
+            in_low.remove(v);
+            if !removed.contains(v) {
                 return v;
             }
         }
 
         let v = self
-            .nodes
+            .present
             .iter()
-            .filter(|v| !removed.contains(v))
-            .max_by_key(|v| degree.get(v).copied().unwrap_or(0))
-            .copied()
+            .filter(|v| !removed.contains(*v))
+            .max_by_key(|v| degree[*v])
             .expect("graph should not be empty");
 
         potential_spills.insert(v);
@@ -178,15 +205,17 @@ impl InterferenceGraph {
         let mut spilled: Vec<usize> = Vec::new();
 
         while let Some(v) = stack.pop() {
-            let used_colors: HashSet<u8> = self
-                .adjacency
-                .get(&v)
-                .into_iter()
-                .flatten()
-                .filter_map(|u| coloring.get(u).copied())
-                .collect();
+            let mut used_colors: u32 = 0;
+            for u in self.adjacency[v].iter() {
+                if let Some(&c) = coloring.get(&u) {
+                    used_colors |= 1u32 << c;
+                }
+            }
 
-            if let Some(&color) = ALLOCATABLE_REGS.iter().find(|c| !used_colors.contains(c)) {
+            if let Some(&color) = ALLOCATABLE_REGS
+                .iter()
+                .find(|c| used_colors & (1u32 << **c) == 0)
+            {
                 coloring.insert(v, color);
             } else {
                 spilled.push(v);

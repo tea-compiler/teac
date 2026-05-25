@@ -363,14 +363,26 @@ impl<W: Write> AsmPrinter<W> {
                     )?;
                 } else if dst != base {
                     let tmp0_s = self.reg_name(dst, RegSize::X64);
-                    let tmp1 = self
-                        .pick_scratch_reg(&[dst, base])
-                        .unwrap_or(Register::Physical(SCRATCH0));
-                    let tmp1_s = self.reg_name(tmp1, RegSize::X64);
-                    writeln!(self.writer, "\tsxtw {tmp0_s}, {idx_s}")?;
-                    self.emit_mov_imm(&tmp1_s, scale as u64)?;
-                    writeln!(self.writer, "\tmul {tmp0_s}, {tmp0_s}, {tmp1_s}")?;
-                    writeln!(self.writer, "\tadd {dst_s}, {base_s}, {tmp0_s}")?;
+                    if let Some(tmp1) = self.pick_scratch_reg(&[dst, base]) {
+                        let tmp1_s = self.reg_name(tmp1, RegSize::X64);
+                        writeln!(self.writer, "\tsxtw {tmp0_s}, {idx_s}")?;
+                        self.emit_mov_imm(&tmp1_s, scale as u64)?;
+                        writeln!(self.writer, "\tmul {tmp0_s}, {tmp0_s}, {tmp1_s}")?;
+                        writeln!(self.writer, "\tadd {dst_s}, {base_s}, {tmp0_s}")?;
+                    } else {
+                        // {dst, base} occupies both scratch registers, leaving
+                        // no third register for the scale immediate.  Stash
+                        // base on the stack so its register can hold the
+                        // scale, then reload base for the final add.
+                        self.emit_sub_sp(16)?;
+                        writeln!(self.writer, "\tstr {base_s}, [sp]")?;
+                        writeln!(self.writer, "\tsxtw {tmp0_s}, {idx_s}")?;
+                        self.emit_mov_imm(&base_s, scale as u64)?;
+                        writeln!(self.writer, "\tmul {tmp0_s}, {tmp0_s}, {base_s}")?;
+                        writeln!(self.writer, "\tldr {base_s}, [sp]")?;
+                        self.emit_add_sp(16)?;
+                        writeln!(self.writer, "\tadd {dst_s}, {base_s}, {tmp0_s}")?;
+                    }
                 } else if matches!(base, Register::Physical(r) if r == SCRATCH0)
                     || matches!(base, Register::Physical(r) if r == SCRATCH1)
                 {

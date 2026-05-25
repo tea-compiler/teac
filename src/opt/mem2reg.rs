@@ -59,7 +59,7 @@ impl Mem2RegPass {
                 .map(|b| info.load_before_store_blocks.contains(&b))
                 .collect();
             let kill: Vec<bool> = (0..n).map(|b| info.def_blocks.contains(&b)).collect();
-            let liveness = BackwardLiveness::<bool>::compute(&gen, &kill, cfg.graph());
+            let liveness = BackwardLiveness::compute(&gen, &kill, cfg.graph(), false);
 
             let mut worklist: VecDeque<usize> = info.def_blocks.iter().copied().collect();
 
@@ -109,53 +109,26 @@ impl AllocaAnalysis {
     /// 2. It is not used in any invalid way (e.g., address taken for non-load/store).
     /// 3. Every block that loads before storing is dominated by at least one
     ///    definition block, ensuring reads always see a defined value.
-    ///
-    /// Single-definition variables are rate-limited to avoid exploding the
-    /// register allocator's interference graph on stress tests.
     fn promotable_vars(&self, dom_info: &DominatorInfo) -> HashMap<LocalId, VarUsage> {
-        let mut multi_def = HashMap::new();
-        let mut single_def = HashMap::new();
+        let mut out = HashMap::new();
 
         for (&var, info) in &self.usage {
             if info.invalid || !info.has_store {
                 continue;
             }
 
-            let mut ok = true;
-            for &block in &info.load_before_store_blocks {
-                let has_dom_def = info
-                    .def_blocks
+            let all_loads_dominated = info.load_before_store_blocks.iter().all(|&block| {
+                info.def_blocks
                     .iter()
-                    .any(|&def_block| def_block != block && dom_info.dominates(def_block, block));
-                if !has_dom_def {
-                    ok = false;
-                    break;
-                }
-            }
+                    .any(|&def_block| def_block != block && dom_info.dominates(def_block, block))
+            });
 
-            if ok {
-                if info.def_blocks.len() <= 1 {
-                    single_def.insert(var, info.clone());
-                } else {
-                    multi_def.insert(var, info.clone());
-                }
+            if all_loads_dominated {
+                out.insert(var, info.clone());
             }
         }
 
-        // Promoting single-def variables (defined in exactly one block)
-        // extends live ranges: the stored value stays live from its
-        // definition until its last use, instead of being killed at
-        // the store.  For functions with very many single-def locals
-        // (e.g., stress tests with thousands of variables), this causes
-        // the O(n²) register allocator's interference graph to explode.
-        //
-        // Promote single-def variables only when the count is manageable.
-        const SINGLE_DEF_LIMIT: usize = 256;
-        if single_def.len() <= SINGLE_DEF_LIMIT {
-            multi_def.extend(single_def);
-        }
-
-        multi_def
+        out
     }
 
     /// Scans all blocks for alloca instructions that produce `*i32` pointers.
