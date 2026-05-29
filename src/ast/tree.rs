@@ -79,7 +79,7 @@ impl DisplayAsTree for Program {
         writeln!(f, "{}Program", tree_indent(indent_levels, is_last))?;
         // Build the indentation context for children.
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
+        new_indent.push(is_last);
         let last_index = self.elements.len().saturating_sub(1);
         for (i, elem) in self.elements.iter().enumerate() {
             elem.fmt_tree(f, &new_indent, i == last_index)?;
@@ -115,7 +115,9 @@ impl DisplayAsTree for VarDeclStmt {
     ) -> Result<(), Error> {
         writeln!(f, "{}VarDeclStmt", tree_indent(indent_levels, is_last))?;
         // The inner node is always the single (last) child.
-        self.inner.fmt_tree(f, indent_levels, true)
+        let mut new_indent = indent_levels.to_vec();
+        new_indent.push(is_last);
+        self.inner.fmt_tree(f, &new_indent, true)
     }
 }
 
@@ -207,7 +209,7 @@ impl DisplayAsTree for FnDecl {
         if let Some(params) = &self.param_decl {
             // Extend the indentation context for the parameter subtree.
             let mut new_indent = indent_levels.to_vec();
-            new_indent.push(!is_last);
+            new_indent.push(is_last);
             writeln!(f, "{}Params:", tree_indent(&new_indent, false))?;
             params.decls.fmt_tree(f, &new_indent, true)?;
         }
@@ -242,7 +244,7 @@ impl DisplayAsTree for FnDef {
             self.fn_decl.identifier
         )?;
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
+        new_indent.push(is_last);
         self.stmts.fmt_tree(f, &new_indent, true)
     }
 }
