@@ -1,4 +1,3 @@
-use crate::ast;
 use std::fmt::{self, Display, Formatter};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -79,53 +78,3 @@ pub struct FunctionType {
     pub arguments: Vec<(String, Dtype)>,
 }
 
-impl TryFrom<&ast::FnDecl> for FunctionType {
-    type Error = crate::ir::Error;
-
-    /// Lowers an AST function declaration into a [`FunctionType`].
-    ///
-    /// Besides the straightforward type conversion, this enforces two
-    /// language rules that the back-end relies on:
-    ///
-    /// 1. Array parameters are rejected with
-    ///    [`crate::ir::Error::ArrayParameterNotAllowed`] — TeaLang requires
-    ///    arrays to be passed by reference (`&[T]`).
-    /// 2. Return types are whitelisted to `void` and `i32`.  Struct returns
-    ///    are grammatically legal but not yet implemented in the AArch64
-    ///    back-end; allowing them here would produce IR that can't be
-    ///    lowered, so they are rejected up-front with
-    ///    [`crate::ir::Error::UnsupportedReturnType`].
-    fn try_from(decl: &ast::FnDecl) -> Result<Self, Self::Error> {
-        let return_dtype = decl
-            .return_dtype
-            .as_ref()
-            .map_or(Dtype::Void, Dtype::from);
-
-        match &return_dtype {
-            Dtype::Void | Dtype::I32 => {}
-            _ => {
-                return Err(crate::ir::Error::UnsupportedReturnType {
-                    symbol: decl.identifier.clone(),
-                    dtype: return_dtype,
-                });
-            }
-        }
-
-        let mut arguments = Vec::new();
-        if let Some(params) = &decl.param_decl {
-            for p in &params.decls {
-                let id = p.identifier.clone();
-                let dtype = Dtype::try_from(p)?;
-                if matches!(&dtype, Dtype::Array { .. }) {
-                    return Err(crate::ir::Error::ArrayParameterNotAllowed { symbol: id });
-                }
-                arguments.push((id, dtype));
-            }
-        }
-
-        Ok(Self {
-            return_dtype,
-            arguments,
-        })
-    }
-}

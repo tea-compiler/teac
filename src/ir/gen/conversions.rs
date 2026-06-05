@@ -3,10 +3,11 @@
 //! This module provides trait implementations and helper functions to convert
 //! AST-level type representations (`ast::TypeSpecifier`, `ast::VarDecl`,
 //! `ast::VarDef`, `ast::VarDeclStmt`) into their corresponding IR-level
-//! data types (`Dtype`).
+//! data types (`Dtype`), and AST function declarations (`ast::FnDecl`)
+//! into IR function signatures ([`FunctionType`]).
 
 use crate::ast;
-use crate::ir::types::Dtype;
+use crate::ir::types::{Dtype, FunctionType};
 
 /// Converts an optional AST type specifier into the corresponding base IR data type (`Dtype`).
 ///
@@ -79,11 +80,12 @@ impl From<&ast::TypeSpecifier> for Dtype {
 }
 
 // ---------------------------------------------------------------------------
-// `TryFrom` trait implementations: AST declarations -> IR Dtype
+// `TryFrom` trait implementations: AST declarations -> IR types
 // ---------------------------------------------------------------------------
 //
-// These are fallible conversions because certain combinations (e.g., struct
-// definitions with initializers) are not supported and produce an error.
+// These are fallible conversions because certain combinations (e.g. struct
+// definitions with initializers, array parameters in function signatures)
+// are not supported and produce an error.
 
 /// Converts a variable declaration (`VarDecl`) to its IR data type.
 ///
@@ -128,5 +130,56 @@ impl TryFrom<&ast::VarDeclStmt> for Dtype {
             ast::VarDeclStmtInner::Decl(d) => Dtype::try_from(d.as_ref()),
             ast::VarDeclStmtInner::Def(d) => Dtype::try_from(d.as_ref()),
         }
+    }
+}
+
+/// Lowers an AST function declaration into a [`FunctionType`].
+///
+/// Besides the straightforward type conversion, this enforces two
+/// language rules that the back-end relies on:
+///
+/// 1. Array parameters are rejected with
+///    [`crate::ir::Error::ArrayParameterNotAllowed`] — TeaLang requires
+///    arrays to be passed by reference (`&[T]`).
+/// 2. Return types are whitelisted to `void` and `i32`.  Struct returns
+///    are grammatically legal but not yet implemented in the AArch64
+///    back-end; allowing them here would produce IR that can't be
+///    lowered, so they are rejected up-front with
+///    [`crate::ir::Error::UnsupportedReturnType`].
+impl TryFrom<&ast::FnDecl> for FunctionType {
+    type Error = crate::ir::Error;
+
+    fn try_from(decl: &ast::FnDecl) -> Result<Self, Self::Error> {
+        let return_dtype = decl
+            .return_dtype
+            .as_ref()
+            .map_or(Dtype::Void, Dtype::from);
+
+        match &return_dtype {
+            Dtype::Void | Dtype::I32 => {}
+            _ => {
+                return Err(crate::ir::Error::UnsupportedReturnType {
+                    symbol: decl.identifier.clone(),
+                    dtype: return_dtype,
+                });
+            }
+        }
+
+        let mut arguments = Vec::new();
+        if let Some(params) = &decl.param_decl {
+            for p in &params.decls {
+                let id = p.identifier.clone();
+                let dtype = Dtype::try_from(p)?;
+                if matches!(&dtype, Dtype::Array { .. }) {
+                    return Err(crate::ir::Error::ArrayParameterNotAllowed { symbol: id });
+                }
+                arguments.push((id, dtype));
+            }
+        }
+
+        Ok(Self {
+            return_dtype,
+            arguments,
+        })
     }
 }
