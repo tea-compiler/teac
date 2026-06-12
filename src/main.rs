@@ -162,8 +162,24 @@ fn run() -> Result<()> {
 
 /// Entry point: delegates to [`run`] and converts any error into a
 /// human-readable message printed to stderr, exiting with code 1.
+///
+/// The compiler is recursive-descent throughout (parsing, AST→IR lowering,
+/// type inference), so a deeply nested source expression — e.g. a sum of
+/// several thousand terms — recurses as deep as the expression nests and can
+/// exhaust the default 8 MiB main-thread stack.  We run the pipeline on a
+/// worker thread with a generous stack instead, the same technique rustc uses
+/// to sidestep deep-recursion stack overflows.
 fn main() {
-    if let Err(e) = run() {
+    const COMPILER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+    let result = std::thread::Builder::new()
+        .stack_size(COMPILER_STACK_SIZE)
+        .spawn(run)
+        .expect("failed to spawn compiler worker thread")
+        .join()
+        .expect("compiler worker thread panicked");
+
+    if let Err(e) = result {
         eprintln!("Error: {e:#}");
         std::process::exit(1);
     }
