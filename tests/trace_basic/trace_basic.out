@@ -1,0 +1,25 @@
+trace lower_bound(3)
+call lower_bound(x = 3)
+  let l = 0
+  let r = 5
+  while l < r -> true
+  loop #1
+    let m = 2
+    if m < x -> true
+      l: 0 -> 3
+  while l < r -> true
+  loop #2
+    let m = 4
+    if m < x -> false
+    else
+      r: 5 -> 4
+  while l < r -> true
+  loop #3
+    let m = 3
+    if m < x -> false
+    else
+      r: 4 -> 3
+  while l < r -> false
+  return 3
+end trace
+0

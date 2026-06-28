@@ -1,0 +1,5 @@
+trace inc(4)
+call inc(x = 4)
+  return 5
+end trace
+50

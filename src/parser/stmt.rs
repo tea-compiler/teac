@@ -1,7 +1,7 @@
 use crate::ast;
 
+use super::common::{get_pos, grammar_error, Pair, ParseResult, Rule};
 use super::ParseContext;
-use super::common::{ParseResult, Pair, Rule, get_pos, grammar_error};
 
 impl<'a> ParseContext<'a> {
     /// Parses a `code_block_stmt` node into a boxed [`ast::CodeBlockStmt`].
@@ -10,6 +10,7 @@ impl<'a> ParseContext<'a> {
     /// rule:
     /// * `var_decl_stmt`  → [`Self::parse_var_decl_stmt`]
     /// * `assignment_stmt` → [`Self::parse_assignment_stmt`]
+    /// * `trace_stmt`      → [`Self::parse_trace_stmt`]
     /// * `call_stmt`       → [`Self::parse_call_stmt`]
     /// * `if_stmt`         → [`Self::parse_if_stmt`]
     /// * `while_stmt`      → [`Self::parse_while_stmt`]
@@ -36,6 +37,11 @@ impl<'a> ParseContext<'a> {
                         inner: ast::CodeBlockStmtInner::Assignment(
                             self.parse_assignment_stmt(inner)?,
                         ),
+                    }));
+                }
+                Rule::trace_stmt => {
+                    return Ok(Box::new(ast::CodeBlockStmt {
+                        inner: ast::CodeBlockStmtInner::Trace(self.parse_trace_stmt(inner)?),
                     }));
                 }
                 Rule::call_stmt => {
@@ -129,6 +135,20 @@ impl<'a> ParseContext<'a> {
         }
 
         Err(grammar_error("call_stmt", &pair_for_error))
+    }
+
+    /// Parses a `trace_stmt` node into a boxed [`ast::TraceStmt`].
+    fn parse_trace_stmt(&self, pair: Pair) -> ParseResult<Box<ast::TraceStmt>> {
+        let pair_for_error = pair.clone();
+        for inner in pair.into_inner() {
+            if inner.as_rule() == Rule::fn_call {
+                return Ok(Box::new(ast::TraceStmt {
+                    fn_call: self.parse_fn_call(inner)?,
+                }));
+            }
+        }
+
+        Err(grammar_error("trace_stmt", &pair_for_error))
     }
 
     /// Parses a `return_stmt` node into a boxed [`ast::ReturnStmt`].
@@ -245,8 +265,7 @@ impl<'a> ParseContext<'a> {
         }
 
         Ok(Box::new(ast::WhileStmt {
-            bool_unit: bool_unit
-                .ok_or_else(|| grammar_error("cond.bool_unit", &pair_for_error))?,
+            bool_unit: bool_unit.ok_or_else(|| grammar_error("cond.bool_unit", &pair_for_error))?,
             stmts,
         }))
     }

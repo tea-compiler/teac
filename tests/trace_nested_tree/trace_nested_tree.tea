@@ -1,0 +1,15 @@
+use std;
+
+fn inc(x:i32) -> i32 {
+    return x + 1;
+}
+
+fn twice(x:i32) -> i32 {
+    let y:i32 = inc(x);
+    return inc(y);
+}
+
+fn main() -> i32 {
+    trace twice(3);
+    return 0;
+}

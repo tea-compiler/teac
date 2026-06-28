@@ -10,6 +10,7 @@
 use crate::ast;
 use crate::ir::compute_link_name;
 use crate::ir::function::{BasicBlock, BlockLabel, Function, FunctionBody, FunctionGenerator};
+use crate::ir::gen::trace;
 use crate::ir::gen::type_infer;
 use crate::ir::module::IrGenerator;
 use crate::ir::printer::IrPrinter;
@@ -81,6 +82,11 @@ impl Generator for IrGenerator<'_> {
             result?;
         }
 
+        let trace_plan = trace::plan(input);
+        if trace_plan.needs_runtime {
+            trace::register_runtime(self);
+        }
+
         // Pass 3: generate IR bodies for every function definition.
         for elem in &input.elements {
             if let ast::ProgramElementInner::FnDef(fn_def) = &elem.inner {
@@ -100,6 +106,7 @@ impl Generator for IrGenerator<'_> {
                         &self.registry,
                         &self.module.global_list,
                         resolved_types,
+                        trace_plan.functions.contains(&fn_def.fn_decl.identifier),
                     );
                     function_generator.generate(fn_def)?;
 

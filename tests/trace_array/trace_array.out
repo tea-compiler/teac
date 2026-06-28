@@ -1,0 +1,6 @@
+trace update()
+call update()
+  a[1]: 1 -> 4
+  return 4
+end trace
+0

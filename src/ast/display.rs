@@ -255,6 +255,7 @@ impl Display for ExprUnitInner {
             ExprUnitInner::Id(id) => write!(f, "{}", id),
             ExprUnitInner::ArithExpr(a) => write!(f, "{}", a),
             ExprUnitInner::FnCall(fc) => write!(f, "{}", fc),
+            ExprUnitInner::TraceCall(fc) => write!(f, "trace {}", fc),
             ExprUnitInner::ArrayExpr(ae) => write!(f, "{}", ae),
             ExprUnitInner::MemberExpr(me) => write!(f, "{}", me),
             ExprUnitInner::Reference(id) => write!(f, "&{}", id),

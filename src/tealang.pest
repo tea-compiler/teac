@@ -106,6 +106,8 @@ kw_return = @{ "return" ~ &(WHITESPACE | semicolon) }
 kw_i32 = @{ "i32" ~ &(WHITESPACE | semicolon | comma | rparen | lbrace | rbrace | rbracket | op_assign) }
 // Example: "use std;"
 kw_use = @{ "use" ~ WHITESPACE }
+// Example: "trace lower_bound(6);"
+kw_trace = @{ "trace" ~ WHITESPACE }
 
 // Identifier: starts with letter or underscore, followed by letters, digits, or underscores
 // Cannot be a keyword: this step is performed after the keyword is recognized.
@@ -235,6 +237,7 @@ fn_def = {
 code_block_stmt = {
     var_decl_stmt
     | assignment_stmt
+    | trace_stmt
     | call_stmt
     | if_stmt
     | while_stmt
@@ -254,6 +257,12 @@ assignment_stmt = {
 // Examples: "init();", "std::putch(10);", "addedge(x, y);"
 call_stmt = {
     fn_call ~ semicolon
+}
+
+// Trace statement: function call with compiler-generated execution trace
+// Example: "trace lower_bound(6);"
+trace_stmt = {
+    kw_trace ~ fn_call ~ semicolon
 }
 
 // Return statement: return from a function with or without a value
@@ -374,6 +383,7 @@ arith_mul_op = { op_mul | op_div }
 // Examples: "x", "10", "arr[i]", "node.value", "std::getint()", "0-x" (negative), "&arr"
 expr_unit = {
     lparen ~ arith_expr ~ rparen
+    | trace_call
     | fn_call
     | ampersand ~ identifier           // address-of: &arr produces &[T] reference from array
     | op_sub ~ num  // negative number
@@ -406,6 +416,12 @@ left_val = {
 fn_call = {
     module_prefixed_call
     | local_call
+}
+
+// Function call wrapped in trace, usable as an expression.
+// Example: "trace inc(4)"
+trace_call = {
+    kw_trace ~ fn_call
 }
 
 // Function call with module prefix, supporting multi-level paths

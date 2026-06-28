@@ -1,0 +1,12 @@
+trace down(2)
+call down(n = 2)
+  if n == 0 -> false
+  call down(n = 1)
+    if n == 0 -> false
+    call down(n = 0)
+      if n == 0 -> true
+        return 0
+    return 0
+  return 0
+end trace
+0

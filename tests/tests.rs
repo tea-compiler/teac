@@ -921,6 +921,11 @@ full_tests! {
     sort_test5,
     sort_test7,
     sort,
+    trace_array,
+    trace_basic,
+    trace_nested_tree,
+    trace_recursive,
+    trace_value,
     unique_path,
     type_infer_basic,
 }

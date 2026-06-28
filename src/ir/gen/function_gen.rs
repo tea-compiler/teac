@@ -9,6 +9,7 @@
 use crate::ast::{self, ArrayInitializer, AssignmentStmt, RightValList};
 use crate::ir::function::{BlockLabel, FunctionGenerator};
 use crate::ir::gen::conversions::{compose_var_decl_dtype, compose_var_def_dtype};
+use crate::ir::gen::trace;
 use crate::ir::stmt::{ArithBinOp, CmpPredicate, StmtInner};
 use crate::ir::types::Dtype;
 use crate::ir::value::{Local, Operand};
@@ -80,6 +81,7 @@ impl FunctionGenerator<'_> {
         self.emit_label(BlockLabel::Function(entry_label));
 
         // Spill every argument to the stack (alloca + store) so they are addressable.
+        let mut trace_args = Vec::new();
         for (id, dtype) in &arguments {
             if self.local_variables.contains_key(id) {
                 return Err(Error::VariableRedefinition { symbol: id.clone() });
@@ -88,6 +90,7 @@ impl FunctionGenerator<'_> {
             // Allocate a virtual register that carries the incoming argument value.
             let arg_local = self.fresh_local(dtype.clone());
             self.arguments.push(arg_local.clone());
+            trace_args.push((id.clone(), Operand::from(&arg_local)));
 
             // Allocate a stack slot (pointer to the argument type) for the argument.
             let slot = self.fresh_local(Dtype::ptr_to(dtype.clone()));
@@ -97,9 +100,14 @@ impl FunctionGenerator<'_> {
             self.local_variables.insert(id.clone(), slot);
         }
 
+        if self.trace_enabled {
+            self.emit_trace_call_line(0, identifier, &trace_args);
+            self.emit_trace_function_enter();
+        }
+
         // Lower the function body statement by statement.
         for stmt in &from.stmts {
-            self.handle_block(stmt, None, None)?;
+            self.handle_block(stmt, None, None, 0)?;
         }
 
         // Append an implicit return if the last instruction is not already a
@@ -109,8 +117,8 @@ impl FunctionGenerator<'_> {
         if let Some(stmt) = self.irs.last() {
             if !matches!(stmt.inner, StmtInner::Return(_)) {
                 match &return_dtype {
-                    Dtype::I32 => self.emit_return(Some(Operand::from(0))),
-                    Dtype::Void => self.emit_return(None),
+                    Dtype::I32 => self.emit_function_return(0, Some(Operand::from(0))),
+                    Dtype::Void => self.emit_function_return(0, None),
                     other => unreachable!(
                         "function {} has return type {other} which \
                          FunctionType::try_from should have rejected",
@@ -129,6 +137,13 @@ impl FunctionGenerator<'_> {
 // -----------------------------------------------------------------------
 
 impl FunctionGenerator<'_> {
+    fn emit_function_return(&mut self, trace_indent: usize, value: Option<Operand>) {
+        if self.trace_enabled {
+            self.emit_trace_function_return(trace_indent, value.clone());
+        }
+        self.emit_return(value);
+    }
+
     /// Dispatches a single code-block statement to the appropriate handler.
     ///
     /// `con_label` and `bre_label` are the jump targets for `continue` and
@@ -139,17 +154,21 @@ impl FunctionGenerator<'_> {
         stmt: &ast::CodeBlockStmt,
         con_label: Option<&BlockLabel>,
         bre_label: Option<&BlockLabel>,
+        trace_indent: usize,
     ) -> Result<(), Error> {
         match &stmt.inner {
-            ast::CodeBlockStmtInner::Assignment(s) => self.handle_assignment_stmt(s),
+            ast::CodeBlockStmtInner::Assignment(s) => self.handle_assignment_stmt(s, trace_indent),
             ast::CodeBlockStmtInner::VarDecl(s) => match &s.inner {
                 ast::VarDeclStmtInner::Decl(d) => self.handle_local_var_decl(d),
-                ast::VarDeclStmtInner::Def(d) => self.handle_local_var_def(d),
+                ast::VarDeclStmtInner::Def(d) => self.handle_local_var_def(d, trace_indent),
             },
             ast::CodeBlockStmtInner::Call(s) => self.handle_call_stmt(s),
-            ast::CodeBlockStmtInner::If(s) => self.handle_if_stmt(s, con_label, bre_label),
-            ast::CodeBlockStmtInner::While(s) => self.handle_while_stmt(s),
-            ast::CodeBlockStmtInner::Return(s) => self.handle_return_stmt(s),
+            ast::CodeBlockStmtInner::Trace(s) => self.handle_trace_stmt(s),
+            ast::CodeBlockStmtInner::If(s) => {
+                self.handle_if_stmt(s, con_label, bre_label, trace_indent)
+            }
+            ast::CodeBlockStmtInner::While(s) => self.handle_while_stmt(s, trace_indent),
+            ast::CodeBlockStmtInner::Return(s) => self.handle_return_stmt(s, trace_indent),
             ast::CodeBlockStmtInner::Continue(_) => self.handle_continue_stmt(con_label),
             ast::CodeBlockStmtInner::Break(_) => self.handle_break_stmt(bre_label),
             ast::CodeBlockStmtInner::Null(_) => Ok(()),
@@ -161,10 +180,33 @@ impl FunctionGenerator<'_> {
     /// `handle_left_val` yields a pointer to the destination's stack slot and
     /// `handle_right_val` yields the value to store, so the assignment is a
     /// single `store` instruction.
-    pub fn handle_assignment_stmt(&mut self, stmt: &AssignmentStmt) -> Result<(), Error> {
+    pub fn handle_assignment_stmt(
+        &mut self,
+        stmt: &AssignmentStmt,
+        trace_indent: usize,
+    ) -> Result<(), Error> {
         let left = self.handle_left_val(&stmt.left_val)?;
         let right = self.handle_right_val(&stmt.right_val)?;
-        self.emit_store(right, left);
+
+        let target = match left.dtype() {
+            Dtype::Pointer { pointee } => pointee.as_ref(),
+            Dtype::I32 if matches!(&left, Operand::Global(_)) => left.dtype(),
+            other => unreachable!(
+                "assignment lhs is neither a pointer nor an assignable global: {other}"
+            ),
+        };
+        let old = if self.trace_enabled && matches!(target, Dtype::I32) {
+            let old = Operand::from(self.fresh_local(Dtype::I32));
+            self.emit_load(old.clone(), left.clone());
+            Some(old)
+        } else {
+            None
+        };
+
+        self.emit_store(right.clone(), left);
+        if let Some(old) = old {
+            self.emit_trace_change_line(trace_indent, &trace::left_val(&stmt.left_val), old, right);
+        }
         Ok(())
     }
 
@@ -173,11 +215,7 @@ impl FunctionGenerator<'_> {
     /// Records the identifier for scope-exit cleanup via [`record_scoped_local`].
     /// Returns `VariableRedefinition` if a variable with the same name already
     /// exists in the symbol table.
-    fn insert_scoped_local(
-        &mut self,
-        identifier: &str,
-        variable: Local,
-    ) -> Result<(), Error> {
+    fn insert_scoped_local(&mut self, identifier: &str, variable: Local) -> Result<(), Error> {
         if self
             .local_variables
             .insert(identifier.to_string(), variable)
@@ -267,7 +305,11 @@ impl FunctionGenerator<'_> {
             let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
             let right_elem = self.handle_right_val(val)?;
 
-            self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
+            self.emit_gep(
+                element_ptr.clone(),
+                base_ptr.clone(),
+                array_index_operand(i),
+            );
             self.emit_store(right_elem, element_ptr);
         }
         Ok(())
@@ -290,7 +332,11 @@ impl FunctionGenerator<'_> {
                 let fill_val = self.handle_right_val(val)?;
                 for i in 0..*count {
                     let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
-                    self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
+                    self.emit_gep(
+                        element_ptr.clone(),
+                        base_ptr.clone(),
+                        array_index_operand(i),
+                    );
                     self.emit_store(fill_val.clone(), element_ptr);
                 }
                 Ok(())
@@ -300,16 +346,22 @@ impl FunctionGenerator<'_> {
 
     /// Lowers a local variable definition (declaration with an initializer)
     /// by allocating a stack slot and storing the initial value into it.
-    pub fn handle_local_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
+    pub fn handle_local_var_def(
+        &mut self,
+        def: &ast::VarDef,
+        trace_indent: usize,
+    ) -> Result<(), Error> {
         let identifier = def.identifier.as_str();
         let explicit = def.type_specifier.as_ref().map(Dtype::from);
         let is_scalar = matches!(&def.inner, ast::VarDefInner::Scalar(_));
         let base = self.local_base_dtype(identifier, explicit.as_ref(), is_scalar);
         let pointee = compose_var_def_dtype(base, &def.inner);
 
+        let mut trace_value = None;
         let variable: Local = match &def.inner {
             ast::VarDefInner::Scalar(scalar) => {
                 let right_val = self.handle_right_val(&scalar.val)?;
+                trace_value = Some(right_val.clone());
                 self.define_scalar_local(pointee, right_val)
             }
             ast::VarDefInner::Array(array) => {
@@ -319,7 +371,13 @@ impl FunctionGenerator<'_> {
             }
         };
 
-        self.insert_scoped_local(identifier, variable)
+        self.insert_scoped_local(identifier, variable)?;
+        if self.trace_enabled {
+            if let Some(value) = trace_value {
+                self.emit_trace_let_line(trace_indent, identifier, value);
+            }
+        }
+        Ok(())
     }
 
     /// Lowers a standalone function call statement.
@@ -328,33 +386,67 @@ impl FunctionGenerator<'_> {
     /// value (which is subsequently discarded), and emits the `call` instruction.
     pub fn handle_call_stmt(&mut self, stmt: &ast::CallStmt) -> Result<(), Error> {
         let function_name = stmt.fn_call.qualified_name();
-        let mut args = Vec::new();
-        for arg in &stmt.fn_call.vals {
-            let right_val = self.handle_right_val(arg)?;
-            args.push(right_val);
-        }
+        let return_dtype = self
+            .registry
+            .function_types
+            .get(&function_name)
+            .ok_or_else(|| Error::FunctionNotDefined {
+                symbol: function_name.clone(),
+            })?
+            .return_dtype
+            .clone();
+        let args = self.eval_call_args(&stmt.fn_call)?;
+        let retval = self.call_result_slot(&function_name, &return_dtype);
+        let link_name = self.resolve_link_name(&function_name);
+        self.emit_call(link_name, retval, args);
+        Ok(())
+    }
 
-        match self.registry.function_types.get(&function_name) {
-            None => Err(Error::FunctionNotDefined {
-                symbol: function_name,
-            }),
-            Some(function_type) => {
-                // `FunctionType::try_from` whitelists return types to Void/I32
-                // at registration; any other variant here would indicate a
-                // broken invariant in the front-end.
-                let retval = match &function_type.return_dtype {
-                    Dtype::Void => None,
-                    Dtype::I32 => Some(Operand::from(self.fresh_local(Dtype::I32))),
-                    other => unreachable!(
-                        "registered function {function_name} has return type {other} \
-                         which FunctionType::try_from should have rejected"
-                    ),
-                };
-                let link_name = self.resolve_link_name(&function_name);
-                self.emit_call(link_name, retval, args);
-                Ok(())
-            }
+    pub fn handle_trace_stmt(&mut self, stmt: &ast::TraceStmt) -> Result<(), Error> {
+        self.emit_traced_call(&stmt.fn_call)?;
+        Ok(())
+    }
+
+    fn eval_call_args(&mut self, fn_call: &ast::FnCall) -> Result<Vec<Operand>, Error> {
+        fn_call
+            .vals
+            .iter()
+            .map(|arg| self.handle_right_val(arg))
+            .collect()
+    }
+
+    fn call_result_slot(&mut self, function_name: &str, return_dtype: &Dtype) -> Option<Operand> {
+        match return_dtype {
+            Dtype::Void => None,
+            Dtype::I32 => Some(Operand::from(self.fresh_local(Dtype::I32))),
+            other => unreachable!(
+                "registered function {function_name} has return type {other} \
+                 which FunctionType::try_from should have rejected"
+            ),
         }
+    }
+
+    fn emit_traced_call(&mut self, fn_call: &ast::FnCall) -> Result<Option<Operand>, Error> {
+        let function_name = fn_call.qualified_name();
+        let return_dtype = self
+            .registry
+            .function_types
+            .get(&function_name)
+            .ok_or_else(|| Error::FunctionNotDefined {
+                symbol: function_name.clone(),
+            })?
+            .return_dtype
+            .clone();
+        let args = self.eval_call_args(fn_call)?;
+
+        self.emit_trace_begin_line(&function_name, &args);
+
+        let retval = self.call_result_slot(&function_name, &return_dtype);
+        let link_name = self.resolve_link_name(&function_name);
+        self.emit_call(link_name, retval.clone(), args);
+
+        self.emit_trace_end_line();
+        Ok(retval)
     }
 
     /// Lowers an `if` / `else` statement into branching IR.
@@ -371,19 +463,33 @@ impl FunctionGenerator<'_> {
         stmt: &ast::IfStmt,
         con_label: Option<&BlockLabel>,
         bre_label: Option<&BlockLabel>,
+        trace_indent: usize,
     ) -> Result<(), Error> {
         let true_label = self.alloc_basic_block();
         let false_label = self.alloc_basic_block();
         let after_label = self.alloc_basic_block();
 
         // Evaluate the condition; jump to the appropriate branch.
-        self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
+        if self.trace_enabled {
+            let cond_value = self.handle_bool_unit_as_value(&stmt.bool_unit)?;
+            self.emit_trace_condition_line(
+                trace_indent,
+                "if",
+                &trace::bool_unit(&stmt.bool_unit),
+                cond_value.clone(),
+            );
+            let cond = Operand::from(self.fresh_local(Dtype::I1));
+            self.emit_cmp(CmpPredicate::Ne, cond_value, Operand::from(0), cond.clone());
+            self.emit_cjump(cond, true_label.clone(), false_label.clone());
+        } else {
+            self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
+        }
 
         // Emit the then-branch; a new scope is opened so that any locals are cleaned up.
         self.emit_label(true_label);
         self.enter_scope();
         for s in &stmt.if_stmts {
-            self.handle_block(s, con_label, bre_label)?;
+            self.handle_block(s, con_label, bre_label, trace_indent + 1)?;
         }
         self.exit_scope();
         // Jump past the else-branch to the merge point.
@@ -393,8 +499,11 @@ impl FunctionGenerator<'_> {
         self.emit_label(false_label);
         self.enter_scope();
         if let Some(else_stmts) = &stmt.else_stmts {
+            if self.trace_enabled {
+                self.emit_trace_else_line(trace_indent);
+            }
             for s in else_stmts {
-                self.handle_block(s, con_label, bre_label)?;
+                self.handle_block(s, con_label, bre_label, trace_indent + 1)?;
             }
         }
         self.exit_scope();
@@ -415,23 +524,44 @@ impl FunctionGenerator<'_> {
     ///           true_label    false_label
     /// ```
     /// `continue` inside the body targets `test_label`; `break` targets `false_label`.
-    pub fn handle_while_stmt(&mut self, stmt: &ast::WhileStmt) -> Result<(), Error> {
+    pub fn handle_while_stmt(
+        &mut self,
+        stmt: &ast::WhileStmt,
+        trace_indent: usize,
+    ) -> Result<(), Error> {
         let test_label = self.alloc_basic_block();
         let true_label = self.alloc_basic_block();
         let false_label = self.alloc_basic_block();
+        let loop_slot = self.trace_enabled.then(|| self.emit_trace_loop_slot());
 
         // Jump unconditionally into the loop test from the predecessor block.
         self.emit_jump(test_label.clone());
 
         // Emit the loop condition test.
         self.emit_label(test_label.clone());
-        self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
+        if self.trace_enabled {
+            let cond_value = self.handle_bool_unit_as_value(&stmt.bool_unit)?;
+            self.emit_trace_condition_line(
+                trace_indent,
+                "while",
+                &trace::bool_unit(&stmt.bool_unit),
+                cond_value.clone(),
+            );
+            let cond = Operand::from(self.fresh_local(Dtype::I1));
+            self.emit_cmp(CmpPredicate::Ne, cond_value, Operand::from(0), cond.clone());
+            self.emit_cjump(cond, true_label.clone(), false_label.clone());
+        } else {
+            self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
+        }
 
         // Loop body; `continue` → test_label, `break` → false_label.
         self.emit_label(true_label);
+        if let Some(slot) = &loop_slot {
+            self.bump_trace_loop(slot, trace_indent);
+        }
         self.enter_scope();
         for s in &stmt.stmts {
-            self.handle_block(s, Some(&test_label), Some(&false_label))?;
+            self.handle_block(s, Some(&test_label), Some(&false_label), trace_indent + 1)?;
         }
         self.exit_scope();
         // Back-edge: jump back to the loop condition.
@@ -445,14 +575,18 @@ impl FunctionGenerator<'_> {
     ///
     /// Emits a void `return` when no value is present, or evaluates the return
     /// expression and emits a value-carrying `return` otherwise.
-    pub fn handle_return_stmt(&mut self, stmt: &ast::ReturnStmt) -> Result<(), Error> {
+    pub fn handle_return_stmt(
+        &mut self,
+        stmt: &ast::ReturnStmt,
+        trace_indent: usize,
+    ) -> Result<(), Error> {
         match &stmt.val {
             None => {
-                self.emit_return(None);
+                self.emit_function_return(trace_indent, None);
             }
             Some(val) => {
                 let val = self.handle_right_val(val)?;
-                self.emit_return(Some(val));
+                self.emit_function_return(trace_indent, Some(val));
             }
         }
         Ok(())
@@ -496,12 +630,7 @@ impl FunctionGenerator<'_> {
         let right = self.handle_expr_unit(&expr.right)?;
 
         let dst = Operand::from(self.fresh_local(Dtype::I1));
-        self.emit_cmp(
-            CmpPredicate::from(&expr.op),
-            left,
-            right,
-            dst.clone(),
-        );
+        self.emit_cmp(CmpPredicate::from(&expr.op), left, right, dst.clone());
         self.emit_cjump(dst, true_label, false_label);
 
         Ok(())
@@ -530,40 +659,31 @@ impl FunctionGenerator<'_> {
             ast::ExprUnitInner::ArithExpr(expr) => self.handle_arith_expr(expr),
             ast::ExprUnitInner::FnCall(fn_call) => {
                 let name = fn_call.qualified_name();
-                let return_dtype = &self
+                let return_dtype = self
                     .registry
                     .function_types
                     .get(&name)
                     .ok_or_else(|| Error::InvalidExprUnit {
                         expr_unit: unit.clone(),
                     })?
-                    .return_dtype;
-
-                // `FunctionType::try_from` whitelists return types to Void/I32.
-                // In expression position, only I32 is usable; a void call in
-                // an expression is a source-level mistake.
-                let res = match return_dtype {
-                    Dtype::I32 => Operand::from(self.fresh_local(Dtype::I32)),
-                    Dtype::Void => {
-                        return Err(Error::InvalidExprUnit {
-                            expr_unit: unit.clone(),
-                        });
+                    .return_dtype
+                    .clone();
+                let res = self.call_result_slot(&name, &return_dtype).ok_or_else(|| {
+                    Error::InvalidExprUnit {
+                        expr_unit: unit.clone(),
                     }
-                    other => unreachable!(
-                        "registered function {name} has return type {other} \
-                         which FunctionType::try_from should have rejected"
-                    ),
-                };
-
-                let mut args: Vec<Operand> = Vec::new();
-                for arg in &fn_call.vals {
-                    let rval = self.handle_right_val(arg)?;
-                    args.push(rval);
-                }
+                })?;
+                let args = self.eval_call_args(fn_call)?;
                 let link_name = self.resolve_link_name(&name);
                 self.emit_call(link_name, Some(res.clone()), args);
 
                 Ok(res)
+            }
+            ast::ExprUnitInner::TraceCall(fn_call) => {
+                self.emit_traced_call(fn_call)?
+                    .ok_or_else(|| Error::InvalidExprUnit {
+                        expr_unit: unit.clone(),
+                    })
             }
             ast::ExprUnitInner::ArrayExpr(expr) => self.handle_array_expr(expr),
             ast::ExprUnitInner::MemberExpr(expr) => self.handle_member_expr(expr),
@@ -701,14 +821,11 @@ impl FunctionGenerator<'_> {
             .map(|elem| &elem.1)
             .ok_or_else(|| Error::InvalidStructMemberExpression { expr: expr.clone() })?;
         let member_dtype = member.dtype.clone();
-        let member_index = i32::try_from(member.index).map_err(|_| {
-            Error::InvalidStructMemberExpression { expr: expr.clone() }
-        })?;
+        let member_index = i32::try_from(member.index)
+            .map_err(|_| Error::InvalidStructMemberExpression { expr: expr.clone() })?;
 
         let target = match &member_dtype {
-            Dtype::Void => {
-                return Err(Error::InvalidStructMemberExpression { expr: expr.clone() })
-            }
+            Dtype::Void => return Err(Error::InvalidStructMemberExpression { expr: expr.clone() }),
             _ => Operand::from(self.fresh_local(Dtype::ptr_to(member_dtype))),
         };
 
@@ -783,6 +900,28 @@ impl FunctionGenerator<'_> {
         );
 
         // Load the materialised 0/1 value back into a register.
+        let loaded = Operand::from(self.fresh_local(Dtype::I32));
+        self.emit_load(loaded.clone(), bool_evaluated);
+
+        Ok(loaded)
+    }
+
+    fn handle_bool_unit_as_value(&mut self, unit: &ast::BoolUnit) -> Result<Operand, Error> {
+        let true_label = self.alloc_basic_block();
+        let false_label = self.alloc_basic_block();
+        let after_label = self.alloc_basic_block();
+
+        let bool_evaluated = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
+        self.emit_alloca(bool_evaluated.clone());
+
+        self.handle_bool_unit(unit, true_label.clone(), false_label.clone())?;
+        self.emit_bool_materialization(
+            true_label,
+            false_label,
+            after_label,
+            bool_evaluated.clone(),
+        );
+
         let loaded = Operand::from(self.fresh_local(Dtype::I32));
         self.emit_load(loaded.clone(), bool_evaluated);
 
