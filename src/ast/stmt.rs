@@ -25,6 +25,13 @@ pub struct CallStmt {
     pub fn_call: Box<FnCall>,
 }
 
+/// A traced function call statement, e.g. `trace lower_bound(6);`.
+#[derive(Debug, Clone)]
+pub struct TraceStmt {
+    /// The function call whose execution should be traced.
+    pub fn_call: Box<FnCall>,
+}
+
 /// A `return` statement, optionally carrying a value.
 #[derive(Debug, Clone)]
 pub struct ReturnStmt {
@@ -76,6 +83,8 @@ pub enum CodeBlockStmtInner {
     Assignment(Box<AssignmentStmt>),
     /// A function-call statement.
     Call(Box<CallStmt>),
+    /// A traced function-call statement.
+    Trace(Box<TraceStmt>),
     /// An `if` (possibly with `else`) statement.
     If(Box<IfStmt>),
     /// A `while` loop statement.

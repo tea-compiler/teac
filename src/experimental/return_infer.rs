@@ -428,6 +428,10 @@ impl Collector<'_> {
                 self.type_of_fn_call(&s.fn_call)?;
                 Ok(())
             }
+            ast::CodeBlockStmtInner::Trace(s) => {
+                self.type_of_fn_call(&s.fn_call)?;
+                Ok(())
+            }
             ast::CodeBlockStmtInner::Return(s) => self.process_return(s),
             ast::CodeBlockStmtInner::Continue(_)
             | ast::CodeBlockStmtInner::Break(_)
@@ -687,6 +691,7 @@ impl Collector<'_> {
             ast::ExprUnitInner::Id(id) => self.resolve_variable(id),
             ast::ExprUnitInner::ArithExpr(expr) => self.type_of_arith_expr(expr),
             ast::ExprUnitInner::FnCall(call) => self.type_of_fn_call(call),
+            ast::ExprUnitInner::TraceCall(call) => self.type_of_fn_call(call),
             ast::ExprUnitInner::ArrayExpr(expr) => self.type_of_array_expr(expr),
             ast::ExprUnitInner::MemberExpr(expr) => self.type_of_member_expr(expr),
             ast::ExprUnitInner::Reference(id) => self.type_of_reference(id),

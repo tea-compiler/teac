@@ -448,10 +448,11 @@ impl<'a> ParseContext<'a> {
     /// precedence:
     /// 1. Negated integer literal: `-<num>`.
     /// 2. Parenthesised arithmetic expression: `(<arith_expr>)`.
-    /// 3. Function call: `<fn_call>`.
-    /// 4. Plain integer literal: `<num>`.
-    /// 5. Reference: `&<identifier>`.
-    /// 6. Identifier with optional field/index suffixes (left-value chain).
+    /// 3. Traced function call: `trace <fn_call>`.
+    /// 4. Function call: `<fn_call>`.
+    /// 5. Plain integer literal: `<num>`.
+    /// 6. Reference: `&<identifier>`.
+    /// 7. Identifier with optional field/index suffixes (left-value chain).
     ///
     /// Returns [`Error::Grammar`] if none of the forms matches.
     ///
@@ -486,6 +487,14 @@ impl<'a> ParseContext<'a> {
             return Ok(Box::new(ast::ExprUnit {
                 pos,
                 inner: ast::ExprUnitInner::ArithExpr(self.parse_arith_expr(filtered[0].clone())?),
+            }));
+        }
+
+        // `trace <fn_call>` — traced call in expression position.
+        if !filtered.is_empty() && filtered[0].as_rule() == Rule::trace_call {
+            return Ok(Box::new(ast::ExprUnit {
+                pos,
+                inner: ast::ExprUnitInner::TraceCall(self.parse_trace_call(filtered[0].clone())?),
             }));
         }
 
@@ -596,6 +605,17 @@ impl<'a> ParseContext<'a> {
             }
         }
         Err(grammar_error("fn_call", &pair_for_error))
+    }
+
+    /// Parses a `trace_call` node into a boxed [`ast::FnCall`].
+    fn parse_trace_call(&self, pair: Pair) -> ParseResult<Box<ast::FnCall>> {
+        let pair_for_error = pair.clone();
+        for inner in pair.into_inner() {
+            if inner.as_rule() == Rule::fn_call {
+                return self.parse_fn_call(inner);
+            }
+        }
+        Err(grammar_error("trace_call", &pair_for_error))
     }
 
     /// Parses a `module_prefixed_call` node into a boxed [`ast::FnCall`].

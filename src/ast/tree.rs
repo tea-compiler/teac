@@ -340,6 +340,31 @@ impl DisplayAsTree for CallStmt {
     }
 }
 
+impl DisplayAsTree for TraceStmt {
+    fn fmt_tree(
+        &self,
+        f: &mut Formatter<'_>,
+        indent_levels: &[bool],
+        is_last: bool,
+    ) -> Result<(), Error> {
+        writeln!(
+            f,
+            "{}TraceStmt {}",
+            tree_indent(indent_levels, is_last),
+            self.fn_call.name
+        )?;
+
+        let mut new_indent = indent_levels.to_vec();
+        new_indent.push(is_last);
+
+        let last_index = self.fn_call.vals.len().saturating_sub(1);
+        for (i, val) in self.fn_call.vals.iter().enumerate() {
+            val.fmt_tree(f, &new_indent, i == last_index)?;
+        }
+        Ok(())
+    }
+}
+
 /// Delegates to the concrete statement variant inside a code block.
 impl DisplayAsTree for CodeBlockStmtInner {
     fn fmt_tree(
@@ -352,6 +377,7 @@ impl DisplayAsTree for CodeBlockStmtInner {
             CodeBlockStmtInner::VarDecl(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
             CodeBlockStmtInner::Assignment(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
             CodeBlockStmtInner::Call(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
+            CodeBlockStmtInner::Trace(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
             CodeBlockStmtInner::If(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
             CodeBlockStmtInner::While(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
             CodeBlockStmtInner::Return(stmt) => stmt.fmt_tree(f, indent_levels, is_last),
@@ -699,6 +725,10 @@ impl DisplayAsTree for ExprUnit {
             ExprUnitInner::Id(id) => writeln!(f, "{}Id({})", tree_indent(&new_indent, true), id),
             ExprUnitInner::ArithExpr(ae) => ae.fmt_tree(f, &new_indent, true),
             ExprUnitInner::FnCall(fc) => fc.fmt_tree(f, &new_indent, true),
+            ExprUnitInner::TraceCall(fc) => {
+                writeln!(f, "{}TraceCall", tree_indent(&new_indent, false))?;
+                fc.fmt_tree(f, &new_indent, true)
+            }
             ExprUnitInner::ArrayExpr(ae) => ae.fmt_tree(f, &new_indent, true),
             ExprUnitInner::MemberExpr(me) => me.fmt_tree(f, &new_indent, true),
             ExprUnitInner::Reference(id) => {

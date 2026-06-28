@@ -1,0 +1,4 @@
+fn putint(x:i32);
+fn putch(x:i32);
+fn getint() -> i32;
+fn getch() -> i32;

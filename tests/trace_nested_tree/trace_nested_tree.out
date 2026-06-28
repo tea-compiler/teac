@@ -1,0 +1,10 @@
+trace twice(3)
+call twice(x = 3)
+  call inc(x = 3)
+    return 4
+  let y = 4
+  call inc(x = 4)
+    return 5
+  return 5
+end trace
+0

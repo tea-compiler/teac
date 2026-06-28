@@ -200,6 +200,8 @@ pub enum ExprUnitInner {
     ArithExpr(Box<ArithExpr>),
     /// A function call whose return value is used as a value.
     FnCall(Box<FnCall>),
+    /// A traced function call whose return value is used as a value.
+    TraceCall(Box<FnCall>),
     /// An array element access used as a value.
     ArrayExpr(Box<ArrayExpr>),
     /// A struct member access used as a value.

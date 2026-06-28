@@ -1,0 +1,20 @@
+use std;
+
+fn lower_bound(x:i32) -> i32 {
+    let l:i32 = 0;
+    let r:i32 = 5;
+    while l < r {
+        let m:i32 = (l + r) / 2;
+        if m < x {
+            l = m + 1;
+        } else {
+            r = m;
+        }
+    }
+    return l;
+}
+
+fn main() -> i32 {
+    trace lower_bound(3);
+    return 0;
+}

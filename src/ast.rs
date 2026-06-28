@@ -38,7 +38,7 @@ pub use expr::{
 
 pub use stmt::{
     AssignmentStmt, BreakStmt, CallStmt, CodeBlockStmt, CodeBlockStmtInner, ContinueStmt, IfStmt,
-    NullStmt, ReturnStmt, WhileStmt,
+    NullStmt, ReturnStmt, TraceStmt, WhileStmt,
 };
 
 pub use decl::{
