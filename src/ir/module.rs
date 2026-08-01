@@ -2,10 +2,10 @@
 //! definitions, and the [`IrGenerator`] that populates them.
 
 use super::function::Function;
+use super::pass::{ModulePass, ModulePassManager};
 use super::types::FunctionType;
 use super::value::GlobalDef;
 use crate::ast;
-use crate::common::pass::{ModulePass, ModulePassManager};
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::rc::Rc;

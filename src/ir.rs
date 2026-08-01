@@ -7,6 +7,7 @@ pub mod error;
 pub mod function;
 mod gen;
 pub mod module;
+pub mod pass;
 pub mod printer;
 pub mod stmt;
 pub mod types;
@@ -67,6 +68,12 @@ pub(crate) fn compute_link_name(source_name: &str, is_external: bool) -> String 
 pub use error::Error;
 pub use function::{BasicBlock, BlockLabel, Function, FunctionBody};
 pub use module::{IrGenerator, Module, Registry};
+//
+// `#[allow(unused_imports)]` because the only in-tree consumer of this
+// re-export (the `experimental::ReturnInferPass` implementation) is gated
+// on the `return-type-inference` feature.
+#[allow(unused_imports)]
+pub use pass::ModulePass;
 pub use types::{Dtype, StructType};
 pub use value::{GlobalDef, Local, LocalId, Operand};
 

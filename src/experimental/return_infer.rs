@@ -59,8 +59,8 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 
 use crate::ast;
-use crate::common::pass::ModulePass;
 use crate::ir::compose_var_def_dtype;
+use crate::ir::ModulePass;
 use crate::ir::module::{IrGenerator, Registry};
 use crate::ir::types::Dtype;
 use crate::ir::value::GlobalDef;
