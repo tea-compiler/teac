@@ -10,6 +10,7 @@
 use crate::ast;
 use crate::ir::compute_link_name;
 use crate::ir::function::{BasicBlock, BlockLabel, Function, FunctionBody, FunctionGenerator};
+use crate::ir::gen::conversions::compose_var_decl_dtype;
 use crate::ir::gen::type_infer;
 use crate::ir::module::IrGenerator;
 use crate::ir::printer::IrPrinter;
@@ -24,7 +25,7 @@ use std::fs;
 use std::io::Write;
 use std::rc::Rc;
 
-/// Implements the two-phase `Generator` trait for the module-level IR generator.
+/// Drives whole-program IR generation; the pass pipeline is documented on `generate`.
 impl Generator for IrGenerator<'_> {
     type Error = Error;
 
@@ -70,10 +71,10 @@ impl Generator for IrGenerator<'_> {
         }
 
         // Pass 2.5: run every module-level plug-in pass registered by
-        // the driver.  We `mem::take` the pipeline out so the pass can
-        // receive `&mut self` without aliasing the list that dispatched
-        // it — the generator's `module_passes` field is empty for the
-        // duration of the loop and gets restored on exit.
+        // the driver.  `mem::take` moves the pipeline out of the generator
+        // so the pass can receive `&mut self` without aliasing the list that
+        // dispatched it — the `module_passes` field is empty for the
+        // duration of the loop and is restored on exit.
         {
             let passes = std::mem::take(&mut self.module_passes);
             let result = passes.run(self);
@@ -93,8 +94,8 @@ impl Generator for IrGenerator<'_> {
                 let resolved_types =
                     type_infer::infer_function(&self.registry, &self.module.global_list, fn_def)?;
 
-                // Use a scoped FunctionGenerator so its temporary state is
-                // dropped before we mutably borrow `self.module` below.
+                // Scoped so the FunctionGenerator's temporary state drops
+                // before `self.module` is mutably borrowed below.
                 let body = {
                     let mut function_generator = FunctionGenerator::new(
                         &self.registry,
@@ -132,7 +133,7 @@ impl Generator for IrGenerator<'_> {
     /// Emit the complete IR module to the provided writer in textual form.
     ///
     /// Delegates to [`IrPrinter::emit_module`] — the same helper used by
-    /// [`crate::opt::Optimizer::output`] — so that pre-optimization and
+    /// `crate::opt::Optimizer::output` — so that pre-optimization and
     /// post-optimization IR dumps share one code path and one canonical
     /// format.
     fn output<W: Write>(&self, w: &mut W) -> Result<(), Error> {
@@ -237,7 +238,6 @@ impl IrGenerator<'_> {
 
         for stmt in irs {
             if let StmtInner::Label(l) = &stmt.inner {
-                // Finalise the previous block (if any) and start a new one.
                 if let Some(prev_label) = label.take() {
                     blocks.push(BasicBlock {
                         label: prev_label,
@@ -270,9 +270,6 @@ impl IrGenerator<'_> {
             return blocks;
         }
 
-        // Hoist all allocas from non-entry blocks to the entry block, right
-        // after the entry label.  This ensures all stack allocations happen in
-        // the entry block (LLVM convention).
         let mut hoisted_allocas: Vec<Stmt> = Vec::new();
         for block in blocks.iter_mut().skip(1) {
             let (allocas, remaining): (Vec<Stmt>, Vec<Stmt>) = block
@@ -282,16 +279,14 @@ impl IrGenerator<'_> {
             hoisted_allocas.extend(allocas);
             block.stmts = remaining;
         }
-        // Insert hoisted allocas at the beginning of the entry block.
         blocks[0].stmts.splice(0..0, hoisted_allocas);
 
         // Post-hoist invariant: every block still has at least a terminator
-        // (`return` / `jump` / `cjump`) because the IR generator always emits
-        // one for reachable blocks, and the terminator is not an alloca so it
-        // is never hoisted away.  Blocks that somehow ended up empty (only an
-        // alloca-only body) would become dangling jump targets if dropped, so
-        // we verify — and drop — them together with the edges that reach
-        // them.
+        // (`return` / `jump` / `cjump`), because the generator emits one for
+        // every reachable block and a terminator is never an alloca, so
+        // hoisting cannot empty a reachable block.  An empty block that is
+        // still referenced by a jump would become a dangling target once
+        // dropped, so removal below is guarded by that reference check.
         Self::drop_empty_blocks_or_panic(&mut blocks);
 
         blocks
@@ -310,8 +305,8 @@ impl IrGenerator<'_> {
             return;
         }
 
-        // Collect the labels referenced by any remaining (non-empty) block's
-        // terminator so we can tell whether an empty block is still reachable.
+        // Collect every label targeted by a non-empty block's terminator; an
+        // empty block whose label appears in this set is still reachable.
         let mut referenced: HashSet<String> = HashSet::new();
         for block in blocks.iter().filter(|b| !b.stmts.is_empty()) {
             for stmt in &block.stmts {
@@ -534,10 +529,7 @@ impl IrGenerator<'_> {
                 decl.identifier.clone(),
                 StructMember {
                     index,
-                    dtype: match &decl.inner {
-                        ast::VarDeclInner::Scalar => base_dtype,
-                        ast::VarDeclInner::Array(array) => Dtype::array_of(base_dtype, array.len),
-                    },
+                    dtype: compose_var_decl_dtype(base_dtype, &decl.inner),
                 },
             ));
         }

@@ -49,6 +49,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 
 use crate::ast;
+use crate::ir::gen::conversions::{compose_var_decl_dtype, compose_var_def_dtype};
 use crate::ir::module::Registry;
 use crate::ir::types::Dtype;
 use crate::ir::value::GlobalDef;
@@ -94,10 +95,6 @@ impl TypeInference<'_> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
 
 /// Resolve the types of all local variables in `fn_def`.
 ///
@@ -146,10 +143,6 @@ pub fn infer_function(
     Ok(resolved)
 }
 
-// ---------------------------------------------------------------------------
-// Statement processing
-// ---------------------------------------------------------------------------
-
 impl TypeInference<'_> {
     fn process_stmt(&mut self, stmt: &ast::CodeBlockStmt) -> Result<(), Error> {
         match &stmt.inner {
@@ -178,34 +171,25 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Variable declaration (no initializer)
-    // -----------------------------------------------------------------------
-
     /// R1 (`let x: T;`) and R4 (`let x;`).
     fn process_var_decl(&mut self, decl: &ast::VarDecl) {
         let id = &decl.identifier;
-        let state = match (&decl.type_specifier, &decl.inner) {
-            // Typed scalar: let x: T;
-            (Some(ts), ast::VarDeclInner::Scalar) => VarState::Resolved(Dtype::from(ts)),
-            // Typed array: let x: [T; N];
-            (Some(ts), ast::VarDeclInner::Array(arr)) => {
-                VarState::Resolved(Dtype::array_of(Dtype::from(ts), arr.len))
-            }
-            // Untyped array (defaults to i32 elements): let x: [; N] — grammatically
-            // rare but handled for completeness.
-            (None, ast::VarDeclInner::Array(arr)) => {
-                VarState::Resolved(Dtype::array_of(Dtype::I32, arr.len))
-            }
-            // Untyped scalar: let x;
+        let state = match (decl.type_specifier.as_ref(), &decl.inner) {
+            // Untyped scalar (`let x;`): stays Pending until the first
+            // assignment — unlike `compose_var_decl_dtype`, which defaults a
+            // missing specifier to i32, this pass must keep the type open.
             (None, ast::VarDeclInner::Scalar) => VarState::Pending,
+            // Typed scalar (`let x: T;`), typed array (`let x: [T; N];`), and
+            // the grammatically-rare untyped array (`let x: [; N]`, i32
+            // elements) all compose the storage dtype the same way, so
+            // delegate to the canonical helper.
+            (specifier, inner) => VarState::Resolved(compose_var_decl_dtype(
+                specifier.map_or(Dtype::I32, Dtype::from),
+                inner,
+            )),
         };
         self.env.insert(id.clone(), state);
     }
-
-    // -----------------------------------------------------------------------
-    // Variable definition (with initializer)
-    // -----------------------------------------------------------------------
 
     /// R2 (`let x: T = e;`) and R3 (`let x = e;`).
     fn process_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
@@ -225,14 +209,14 @@ impl TypeInference<'_> {
                 self.env.insert(id.clone(), VarState::Resolved(resolved));
             }
             ast::VarDefInner::Array(arr) => {
-                let elem_type = match &explicit_dtype {
-                    Some(t) => t.clone(),
-                    None => Dtype::I32,
-                };
                 self.check_array_initializer(&arr.initializer)?;
+                // Element type defaults to i32 when no specifier is present;
+                // the array wrap is the canonical composition, so delegate
+                // to `compose_var_def_dtype`.
+                let base = explicit_dtype.clone().unwrap_or(Dtype::I32);
                 self.env.insert(
                     id.clone(),
-                    VarState::Resolved(Dtype::array_of(elem_type, arr.len)),
+                    VarState::Resolved(compose_var_def_dtype(base, &def.inner)),
                 );
             }
         }
@@ -253,10 +237,6 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Assignment
-    // -----------------------------------------------------------------------
-
     /// R5 / R6: `x = e;` — resolve a Pending local to typeOf(e), or check
     /// type compatibility against an already-Resolved local.
     fn process_assignment(&mut self, stmt: &ast::AssignmentStmt) -> Result<(), Error> {
@@ -273,9 +253,9 @@ impl TypeInference<'_> {
                         Self::check_compatible(id, &t, &rhs_type)?;
                     }
                     None => {
-                        // Variable not in local env — it may be a global.
-                        // We don't track globals in this pass; IR gen will
-                        // catch undefined references.
+                        // A name absent from the local env may be a global.
+                        // Globals are not tracked in this pass; IR generation
+                        // catches undefined references.
                     }
                 }
             }
@@ -288,10 +268,6 @@ impl TypeInference<'_> {
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Branching (if/else)
-    // -----------------------------------------------------------------------
 
     /// R7: if/else merging.
     fn process_if(&mut self, stmt: &ast::IfStmt) -> Result<(), Error> {
@@ -313,10 +289,6 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Loops
-    // -----------------------------------------------------------------------
-
     /// R8: while merging.
     fn process_while(&mut self, stmt: &ast::WhileStmt) -> Result<(), Error> {
         self.check_bool_unit(&stmt.bool_unit)?;
@@ -329,20 +301,12 @@ impl TypeInference<'_> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Return
-    // -----------------------------------------------------------------------
-
     fn process_return(&mut self, stmt: &ast::ReturnStmt) -> Result<(), Error> {
         if let Some(val) = &stmt.val {
             self.type_of_right_val(val)?;
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Environment merging
-    // -----------------------------------------------------------------------
 
     /// Merge two branch environments back into `self.env`.
     ///
@@ -397,10 +361,6 @@ impl TypeInference<'_> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Expression typing
-// ---------------------------------------------------------------------------
 
 impl TypeInference<'_> {
     /// Compute the type of a right-hand-side value.
@@ -598,10 +558,6 @@ impl TypeInference<'_> {
         Ok(Self::element_type_of_indexing(&arr_type))
     }
 
-    // -----------------------------------------------------------------------
-    // Boolean expression checking (just validates sub-expressions)
-    // -----------------------------------------------------------------------
-
     fn check_bool_expr(&self, expr: &ast::BoolExpr) -> Result<(), Error> {
         match &expr.inner {
             ast::BoolExprInner::BoolBiOpExpr(biop) => {
@@ -623,10 +579,6 @@ impl TypeInference<'_> {
             ast::BoolUnitInner::BoolUOpExpr(expr) => self.check_bool_unit(&expr.cond),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Type compatibility check
-    // -----------------------------------------------------------------------
 
     fn check_compatible(symbol: &str, expected: &Dtype, actual: &Dtype) -> Result<(), Error> {
         if expected == actual {
