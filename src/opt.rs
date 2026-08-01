@@ -1,6 +1,5 @@
 //! Post-IR optimization: the [`Optimizer`] and its function-level passes.
 
-pub mod cfg;
 mod dominator;
 mod mem2reg;
 

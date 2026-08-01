@@ -1,3 +1,16 @@
+//! Dominator analysis over a control-flow graph.
+//!
+//! [`DominatorInfo`] computes, for a [`Graph`]:
+//!
+//! - the immediate dominator of every block, using the algorithm from
+//!   Cooper, Harvey, and Kennedy, "A Simple, Fast Dominance Algorithm"
+//!   (2001) — queried via [`DominatorInfo::dominates`] and the dominator
+//!   tree via [`DominatorInfo::dom_children`] and
+//!   [`DominatorInfo::dom_tree_roots`];
+//! - the dominance frontier of every block
+//!   ([`DominatorInfo::dominance_frontier`]), used by the mem2reg pass to
+//!   decide where phi functions must be placed.
+
 use crate::common::graph::Graph;
 use std::collections::HashSet;
 

@@ -1,6 +1,21 @@
-use super::cfg::Cfg;
+//! Mem2Reg: promotes stack-allocated `i32` locals to SSA form.
+//!
+//! The pass runs on a function body in three stages:
+//!
+//! - [`AllocaAnalysis`] finds promotable variables: `alloca`s of `*i32`
+//!   that are only accessed through loads and stores, and whose
+//!   upward-exposed loads are all dominated by a store.
+//! - [`Mem2RegPass::place_phis`] inserts phi functions at the iterated
+//!   dominance frontier of the stores, pruned by backward liveness so no
+//!   phi is created where the variable is dead.
+//! - [`Renamer`] walks the dominator tree with a per-variable stack of
+//!   reaching definitions, turning loads into aliases and dropping the
+//!   promoted allocas, loads, and stores; [`Renamer::finish`] then
+//!   materialises the phis at the head of each block.
+
 use super::dominator::DominatorInfo;
 use super::FunctionPass;
+use crate::common::cfg::Cfg;
 use crate::common::graph::BackwardLiveness;
 use crate::ir::function::{BasicBlock, BlockLabel, Function};
 use crate::ir::stmt::{OperandRole, Stmt, StmtInner};

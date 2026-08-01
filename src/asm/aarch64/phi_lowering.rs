@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::ir::function::{BasicBlock, BlockLabel};
 use crate::ir::stmt::{PhiStmt, Stmt, StmtInner};
+use crate::common::cfg::Cfg;
 use crate::ir::Operand;
-use crate::opt::cfg::Cfg;
 
 /// Plan for destroying SSA form in one function: the block bodies with
 /// their phi nodes stripped and terminators retargeted across split
