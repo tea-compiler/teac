@@ -1,6 +1,21 @@
-use super::cfg::Cfg;
+//! Mem2Reg: promotes stack-allocated `i32` locals to SSA form.
+//!
+//! The pass runs on a function body in three stages:
+//!
+//! - [`AllocaAnalysis`] finds promotable variables: `alloca`s of `*i32`
+//!   that are only accessed through loads and stores, and whose
+//!   upward-exposed loads are all dominated by a store.
+//! - [`Mem2RegPass::place_phis`] inserts phi functions at the iterated
+//!   dominance frontier of the stores, pruned by backward liveness so no
+//!   phi is created where the variable is dead.
+//! - [`Renamer`] walks the dominator tree with a per-variable stack of
+//!   reaching definitions, turning loads into aliases and dropping the
+//!   promoted allocas, loads, and stores; [`Renamer::finish`] then
+//!   materialises the phis at the head of each block.
+
 use super::dominator::DominatorInfo;
 use super::FunctionPass;
+use crate::common::cfg::Cfg;
 use crate::common::graph::BackwardLiveness;
 use crate::ir::function::{BasicBlock, BlockLabel, Function};
 use crate::ir::stmt::{OperandRole, Stmt, StmtInner};
@@ -92,10 +107,6 @@ struct AllocaAnalysis {
 
 impl AllocaAnalysis {
     /// Constructs an `AllocaAnalysis` by scanning all basic blocks.
-    ///
-    /// First identifies alloca instructions that allocate i32 pointers as
-    /// promotion candidates, then analyzes their load/store usage patterns
-    /// across all blocks.
     fn from_blocks(blocks: &[BasicBlock]) -> Self {
         let candidates = Self::collect_candidates(blocks);
         let usage = Self::analyze_usage(blocks, &candidates);
@@ -152,11 +163,10 @@ impl AllocaAnalysis {
         multi_def
     }
 
-    /// Scans all blocks for alloca instructions that produce `*i32` pointers.
-    ///
-    /// Returns the set of [`LocalId`]s for these allocas. Only i32 pointer
-    /// allocas are considered because the current implementation only
-    /// supports promoting scalar integer values.
+    /// Scans all blocks for alloca instructions that produce `*i32` pointers
+    /// and returns the set of their [`LocalId`]s. The pass is `i32`-only
+    /// because phi placement hardcodes `Dtype::I32` for the promoted
+    /// temporaries.
     fn collect_candidates(blocks: &[BasicBlock]) -> HashSet<LocalId> {
         let mut candidates = HashSet::new();
         for stmt in blocks.iter().flat_map(|block| block.stmts.iter()) {

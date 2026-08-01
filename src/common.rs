@@ -2,6 +2,7 @@
 //! including target platform detection and a generic code generator trait.
 
 pub mod bitset;
+pub mod cfg;
 pub mod graph;
 pub mod pass;
 
