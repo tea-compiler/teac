@@ -107,10 +107,6 @@ struct AllocaAnalysis {
 
 impl AllocaAnalysis {
     /// Constructs an `AllocaAnalysis` by scanning all basic blocks.
-    ///
-    /// First identifies alloca instructions that allocate i32 pointers as
-    /// promotion candidates, then analyzes their load/store usage patterns
-    /// across all blocks.
     fn from_blocks(blocks: &[BasicBlock]) -> Self {
         let candidates = Self::collect_candidates(blocks);
         let usage = Self::analyze_usage(blocks, &candidates);
@@ -167,11 +163,10 @@ impl AllocaAnalysis {
         multi_def
     }
 
-    /// Scans all blocks for alloca instructions that produce `*i32` pointers.
-    ///
-    /// Returns the set of [`LocalId`]s for these allocas. Only i32 pointer
-    /// allocas are considered because the current implementation only
-    /// supports promoting scalar integer values.
+    /// Scans all blocks for alloca instructions that produce `*i32` pointers
+    /// and returns the set of their [`LocalId`]s. The pass is `i32`-only
+    /// because phi placement hardcodes `Dtype::I32` for the promoted
+    /// temporaries.
     fn collect_candidates(blocks: &[BasicBlock]) -> HashSet<LocalId> {
         let mut candidates = HashSet::new();
         for stmt in blocks.iter().flat_map(|block| block.stmts.iter()) {

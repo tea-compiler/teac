@@ -50,7 +50,6 @@ impl<'a> Optimizer<'a> {
 impl Generator for Optimizer<'_> {
     type Error = Error;
 
-    /// Run every registered pass against every function in the module.
     fn generate(&mut self) -> Result<(), Self::Error> {
         for func in self.module.function_list.values_mut() {
             self.passes.run(func);
@@ -58,7 +57,7 @@ impl Generator for Optimizer<'_> {
         Ok(())
     }
 
-    /// Emit the (now-optimised) IR.
+    /// Emit the optimised IR module to `w`.
     fn output<W: Write>(&self, w: &mut W) -> Result<(), Self::Error> {
         IrPrinter::new(w).emit_module(self.module, self.registry)
     }
