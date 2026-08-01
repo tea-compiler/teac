@@ -60,13 +60,9 @@ pub enum Error {
 pub(crate) struct TeaLangParser;
 
 /// A specialized `Result` type used throughout the parser.
-/// `Ok` carries a successfully parsed value of type `T`; `Err` carries an
-/// [`Error`] describing what went wrong.
 pub(crate) type ParseResult<T> = Result<T, Error>;
 
 /// A single node in the pest parse tree, parameterised by the input lifetime.
-/// This is a type alias for [`pest::iterators::Pair`] bound to the [`Rule`]
-/// enum produced by [`TeaLangParser`].
 pub(crate) type Pair<'a> = pest::iterators::Pair<'a, Rule>;
 
 /// Collapses a raw source snippet into a compact, single-line preview string
@@ -78,9 +74,7 @@ pub(crate) type Pair<'a> = pest::iterators::Pair<'a, Rule>;
 pub(crate) fn compact_snippet(snippet: &str) -> String {
     const MAX_CHARS: usize = 48;
 
-    // Collapse all whitespace sequences into a single space.
     let compact = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Fall back to trimming if the split produced nothing (e.g., all whitespace).
     let normalized = if compact.is_empty() {
         snippet.trim().to_string()
     } else {
@@ -91,7 +85,6 @@ pub(crate) fn compact_snippet(snippet: &str) -> String {
         return "<empty>".to_string();
     }
 
-    // Take up to MAX_CHARS characters; append "..." if the string is longer.
     let mut chars = normalized.chars();
     let preview: String = chars.by_ref().take(MAX_CHARS).collect();
     if chars.next().is_some() {
@@ -108,7 +101,6 @@ pub(crate) fn compact_snippet(snippet: &str) -> String {
 /// or function where the unexpected structure was encountered.
 pub(crate) fn grammar_error(context: &'static str, pair: &Pair<'_>) -> Error {
     let span = pair.as_span();
-    // Extract line and column numbers from the start of the span.
     let (line, column) = span.start_pos().line_col();
     let near = compact_snippet(span.as_str());
 
@@ -133,17 +125,16 @@ pub(crate) fn grammar_error_static(context: &'static str) -> Error {
     }
 }
 
-/// Returns the byte offset of the start of `pair`'s span within the source
-/// string.  This is used to track source positions in AST nodes.
+/// Byte offset of the start of `pair`'s span; recorded as the source position
+/// of AST nodes.
 pub(crate) fn get_pos(pair: &Pair<'_>) -> usize {
     pair.as_span().start()
 }
 
-/// Parses an integer literal from a `num` parse-tree node.
+/// Parses the text of a `num` parse-tree node as an `i32`.
 ///
-/// Reads the raw text of `pair`, attempts to parse it as an `i32`, and wraps
-/// any failure in [`Error::InvalidNumber`] that includes the literal text and
-/// its source position.
+/// Failures return [`Error::InvalidNumber`] with the literal text and its
+/// source position.
 pub(crate) fn parse_num(pair: Pair) -> ParseResult<i32> {
     let literal = pair.as_str().to_string();
     let (line, column) = pair.as_span().start_pos().line_col();
