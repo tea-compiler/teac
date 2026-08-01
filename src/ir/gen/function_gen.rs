@@ -19,8 +19,8 @@ use crate::ir::Error;
 /// Array/struct indices are `usize` in the AST and source-language domain
 /// but must be lowered to `i32` to match LLVM IR's GEP index width.  A
 /// source-derived index that does not fit is rejected with
-/// [`Error::ArrayIndexTooLarge`] — this is a hard limit on the emitted IR,
-/// not a TeaLang rule, and in practice no program will ever approach it.
+/// [`Error::ArrayIndexTooLarge`]; that limit comes from the emitted IR,
+/// not from a TeaLang rule.
 fn array_index_operand(index: usize) -> Result<Operand, Error> {
     let index = i32::try_from(index).map_err(|_| Error::ArrayIndexTooLarge { index })?;
     Ok(Operand::from(index))
@@ -44,9 +44,6 @@ fn array_element_dtype(base_ptr: &Operand) -> Dtype {
     }
 }
 
-// -----------------------------------------------------------------------
-// Function entry-point generation
-// -----------------------------------------------------------------------
 
 impl FunctionGenerator<'_> {
     /// Generates IR for a complete function definition.
@@ -59,8 +56,9 @@ impl FunctionGenerator<'_> {
     /// - `from`: the AST node for the function being compiled.
     ///
     /// # Errors
-    /// Returns an error if the function is not registered in the type registry,
-    /// an argument name is redefined, or the return type is unsupported.
+    /// Returns [`Error::FunctionNotDefined`] when the function is absent from
+    /// the type registry, [`Error::VariableRedefinition`] when an argument
+    /// name is duplicated, and any error propagated from statement lowering.
     pub fn generate(&mut self, from: &ast::FnDef) -> Result<(), Error> {
         let identifier = &from.fn_decl.identifier;
         let function_type = self
@@ -91,12 +89,10 @@ impl FunctionGenerator<'_> {
             // Allocate a stack slot (pointer to the argument type) for the argument.
             let slot = self.fresh_local(Dtype::ptr_to(dtype.clone()));
             self.emit_alloca(Operand::from(&slot));
-            // Store the incoming value into the newly allocated stack slot.
             self.emit_store(Operand::from(arg_local), Operand::from(&slot));
             self.local_variables.insert(id.clone(), slot);
         }
 
-        // Lower the function body statement by statement.
         for stmt in &from.stmts {
             self.handle_block(stmt, None, None)?;
         }
@@ -122,10 +118,6 @@ impl FunctionGenerator<'_> {
         Ok(())
     }
 }
-
-// -----------------------------------------------------------------------
-// Statement handlers
-// -----------------------------------------------------------------------
 
 impl FunctionGenerator<'_> {
     /// Dispatches a single code-block statement to the appropriate handler.
@@ -169,7 +161,7 @@ impl FunctionGenerator<'_> {
 
     /// Inserts a local variable into the current scope's symbol table.
     ///
-    /// Records the identifier for scope-exit cleanup via [`record_scoped_local`].
+    /// Records the identifier for scope-exit cleanup via `record_scoped_local`.
     /// Returns `VariableRedefinition` if a variable with the same name already
     /// exists in the symbol table.
     fn insert_scoped_local(
@@ -201,7 +193,7 @@ impl FunctionGenerator<'_> {
 
     /// Allocates stack space for a scalar local and initializes it with `right_val`.
     ///
-    /// Combines [`allocate_pointer_local`] with an immediate `store` instruction.
+    /// Combines `allocate_pointer_local` with an immediate `store` instruction.
     fn define_scalar_local(&mut self, pointee: Dtype, right_val: Operand) -> Local {
         let local = self.allocate_pointer_local(pointee);
         self.emit_store(right_val, Operand::from(&local));
@@ -212,10 +204,11 @@ impl FunctionGenerator<'_> {
     ///
     /// For typed declarations the base comes directly from the AST annotation.
     /// For **untyped scalars**, the base comes from the resolved-types map
-    /// produced by the type inference pass (falling back to `i32` when
-    /// inference could not determine anything — e.g. a declared-but-never-used
-    /// local).  **Untyped arrays** always default to `i32` elements because
-    /// TeaLang does not support inferring an array's element type.
+    /// produced by the type inference pass; inference rejects any variable
+    /// still `Pending` at function end, so the map covers every reachable
+    /// local and the `i32` fallback only defends the invariant.  **Untyped
+    /// arrays** always default to `i32` elements because TeaLang does not
+    /// support inferring an array's element type.
     fn local_base_dtype(
         &self,
         identifier: &str,
@@ -278,7 +271,7 @@ impl FunctionGenerator<'_> {
 
     /// Initializes an array from an [`ArrayInitializer`].
     ///
-    /// Delegates to [`init_array`] for explicit element lists.  For fill
+    /// Delegates to `init_array` for explicit element lists.  For fill
     /// initializers, evaluates the fill value once and repeats the store for
     /// every index up to `count`.
     pub fn init_array_from(
@@ -383,7 +376,6 @@ impl FunctionGenerator<'_> {
         let false_label = self.alloc_basic_block();
         let after_label = self.alloc_basic_block();
 
-        // Evaluate the condition; jump to the appropriate branch.
         self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
 
         // Emit the then-branch; a new scope is opened so that any locals are cleaned up.
@@ -393,7 +385,6 @@ impl FunctionGenerator<'_> {
             self.handle_block(s, con_label, bre_label)?;
         }
         self.exit_scope();
-        // Jump past the else-branch to the merge point.
         self.emit_jump(after_label.clone());
 
         // Emit the (possibly absent) else-branch in its own scope.
@@ -430,7 +421,6 @@ impl FunctionGenerator<'_> {
         // Jump unconditionally into the loop test from the predecessor block.
         self.emit_jump(test_label.clone());
 
-        // Emit the loop condition test.
         self.emit_label(test_label.clone());
         self.handle_bool_unit(&stmt.bool_unit, true_label.clone(), false_label.clone())?;
 
@@ -483,10 +473,6 @@ impl FunctionGenerator<'_> {
         Ok(())
     }
 }
-
-// -----------------------------------------------------------------------
-// Expression and value handlers
-// -----------------------------------------------------------------------
 
 impl FunctionGenerator<'_> {
     /// Lowers a comparison expression into a conditional branch.
@@ -761,16 +747,12 @@ impl FunctionGenerator<'_> {
     }
 }
 
-// -----------------------------------------------------------------------
-// Boolean expression handlers
-// -----------------------------------------------------------------------
-
 impl FunctionGenerator<'_> {
     /// Lowers a boolean expression to a materialized `i32` value (0 or 1).
     ///
     /// Allocates a temporary `i32` stack slot, evaluates the expression as a
     /// branch (writing 1 on the true path and 0 on the false path via
-    /// [`emit_bool_materialization`]), then loads and returns the result.
+    /// `emit_bool_materialization`), then loads and returns the result.
     fn handle_bool_expr_as_value(&mut self, expr: &ast::BoolExpr) -> Result<Operand, Error> {
         let true_label = self.alloc_basic_block();
         let false_label = self.alloc_basic_block();
@@ -858,7 +840,6 @@ impl FunctionGenerator<'_> {
         let eval_right_label = self.alloc_basic_block();
         match &expr.op {
             ast::BoolBiOp::And => {
-                // Short-circuit AND: only evaluate the right side if the left side is true.
                 self.handle_bool_expr_as_branch(
                     &expr.left,
                     eval_right_label.clone(),
@@ -869,7 +850,6 @@ impl FunctionGenerator<'_> {
                 self.handle_bool_expr_as_branch(&expr.right, true_label, false_label)?;
             }
             ast::BoolBiOp::Or => {
-                // Short-circuit OR: only evaluate the right side if the left side is false.
                 self.handle_bool_expr_as_branch(
                     &expr.left,
                     true_label.clone(),
