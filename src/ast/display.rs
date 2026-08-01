@@ -42,15 +42,19 @@ impl Display for TypeSpecifier {
     }
 }
 
-/// Formats an arithmetic binary operator as its LLVM IR mnemonic
-/// (e.g., `add`, `sub`, `mul`, `sdiv`).
+/// Formats an arithmetic binary operator as its TeaLang source-level symbol
+/// (`+`, `-`, `*`, `/`).
+///
+/// The LLVM IR mnemonics (`add`, `sdiv`, …) are printed by the IR layer's
+/// own `ArithBinOp` Display impl in `ir::stmt`; all consumers of this impl
+/// (the AST tree dump and `ir::Error` messages) are cosmetic.
 impl Display for ArithBiOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
-            ArithBiOp::Add => write!(f, "add"),
-            ArithBiOp::Sub => write!(f, "sub"),
-            ArithBiOp::Mul => write!(f, "mul"),
-            ArithBiOp::Div => write!(f, "sdiv"),
+            ArithBiOp::Add => write!(f, "+"),
+            ArithBiOp::Sub => write!(f, "-"),
+            ArithBiOp::Mul => write!(f, "*"),
+            ArithBiOp::Div => write!(f, "/"),
         }
     }
 }
@@ -76,17 +80,21 @@ impl Display for BoolBiOp {
     }
 }
 
-/// Formats a comparison operator as its LLVM IR predicate mnemonic
-/// (e.g., `eq`, `ne`, `sgt`, …).
+/// Formats a comparison operator as its TeaLang source-level symbol
+/// (`==`, `!=`, `>`, `>=`, `<`, `<=`).
+///
+/// The LLVM IR predicate mnemonics (`eq`, `sgt`, …) are printed by the IR
+/// layer's own `CmpPredicate` Display impl in `ir::stmt`; all consumers of
+/// this impl (the AST tree dump and `ir::Error` messages) are cosmetic.
 impl Display for ComOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
-            ComOp::Eq => write!(f, "eq"),
-            ComOp::Ne => write!(f, "ne"),
-            ComOp::Gt => write!(f, "sgt"),
-            ComOp::Ge => write!(f, "sge"),
-            ComOp::Lt => write!(f, "slt"),
-            ComOp::Le => write!(f, "sle"),
+            ComOp::Eq => write!(f, "=="),
+            ComOp::Ne => write!(f, "!="),
+            ComOp::Gt => write!(f, ">"),
+            ComOp::Ge => write!(f, ">="),
+            ComOp::Lt => write!(f, "<"),
+            ComOp::Le => write!(f, "<="),
         }
     }
 }
@@ -237,7 +245,6 @@ impl Display for MemberExpr {
 /// for qualified calls.
 impl Display for FnCall {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        // Format all argument values as a comma-separated string.
         let args: Vec<String> = self.vals.iter().map(|v| format!("{}", v)).collect();
         if let Some(module) = &self.module_prefix {
             write!(f, "{}::{}({})", module, self.name, args.join(", "))

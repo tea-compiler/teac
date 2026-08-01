@@ -1,9 +1,9 @@
 //! Tree pretty-printer for the AST.
 //!
 //! This module defines the [`DisplayAsTree`] trait and provides implementations
-//! for every AST node type.  When a node is printed with this trait it
-//! produces an indented, Unicode-box-drawing tree that mirrors the logical
-//! structure of the AST, making it easy to read program structure at a glance.
+//! for every AST node type. A node printed with this trait produces an
+//! indented, Unicode-box-drawing tree that mirrors the logical structure of
+//! the AST.
 //!
 //! The indentation state is passed down through the `indent_levels` slice.
 //! Each element records whether the corresponding ancestor was the *last*
@@ -50,25 +50,21 @@ fn tree_indent(indent_levels: &[bool], is_last: bool) -> String {
     let mut s = String::new();
     for &last in indent_levels.iter() {
         if last {
-            // Ancestor was the last child — no vertical connector needed.
             s.push_str("   ");
         } else {
-            // More siblings exist at this ancestor level — draw vertical bar.
             s.push_str("│  ");
         }
     }
     if is_last {
-        // This node is the last child — use a corner connector.
         s.push_str("└─");
     } else {
-        // More siblings follow — use a tee connector.
         s.push_str("├─");
     }
     s
 }
 
-/// Formats the root `Program` node, listing every top-level element as a
-/// child in the tree.
+/// Formats the root `Program` node, listing every `use` statement followed
+/// by every top-level element as children in the tree.
 impl DisplayAsTree for Program {
     fn fmt_tree(
         &self,
@@ -77,14 +73,35 @@ impl DisplayAsTree for Program {
         is_last: bool,
     ) -> Result<(), Error> {
         writeln!(f, "{}Program", tree_indent(indent_levels, is_last))?;
-        // Build the indentation context for children.
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
-        let last_index = self.elements.len().saturating_sub(1);
+        new_indent.push(is_last);
+        // `last_index` indexes into the concatenation of `use_stmts` and
+        // `elements`, so only the final child overall is marked `is_last`.
+        let last_index = (self.use_stmts.len() + self.elements.len()).saturating_sub(1);
+        for (i, use_stmt) in self.use_stmts.iter().enumerate() {
+            use_stmt.fmt_tree(f, &new_indent, i == last_index)?;
+        }
         for (i, elem) in self.elements.iter().enumerate() {
-            elem.fmt_tree(f, &new_indent, i == last_index)?;
+            elem.fmt_tree(f, &new_indent, self.use_stmts.len() + i == last_index)?;
         }
         Ok(())
+    }
+}
+
+/// Prints a leaf `UseStmt <module_path>` node.
+impl DisplayAsTree for UseStmt {
+    fn fmt_tree(
+        &self,
+        f: &mut Formatter<'_>,
+        indent_levels: &[bool],
+        is_last: bool,
+    ) -> Result<(), Error> {
+        writeln!(
+            f,
+            "{}UseStmt {}",
+            tree_indent(indent_levels, is_last),
+            self.module_name
+        )
     }
 }
 
@@ -144,7 +161,6 @@ impl DisplayAsTree for VarDecl {
         indent_levels: &[bool],
         is_last: bool,
     ) -> Result<(), Error> {
-        // Render the type specifier, falling back to "unknown" if absent.
         let type_str = self
             .type_specifier
             .as_ref()
@@ -205,9 +221,8 @@ impl DisplayAsTree for FnDecl {
             self.identifier
         )?;
         if let Some(params) = &self.param_decl {
-            // Extend the indentation context for the parameter subtree.
             let mut new_indent = indent_levels.to_vec();
-            new_indent.push(!is_last);
+            new_indent.push(is_last);
             writeln!(f, "{}Params:", tree_indent(&new_indent, false))?;
             params.decls.fmt_tree(f, &new_indent, true)?;
         }
@@ -242,7 +257,7 @@ impl DisplayAsTree for FnDef {
             self.fn_decl.identifier
         )?;
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
+        new_indent.push(is_last);
         self.stmts.fmt_tree(f, &new_indent, true)
     }
 }
@@ -261,11 +276,9 @@ impl DisplayAsTree for VarDef {
             VarDefInner::Scalar(s) => writeln!(f, "{}{} = {}", prefix, self.identifier, s.val),
             VarDefInner::Array(a) => match &a.initializer {
                 ArrayInitializer::ExplicitList(vals) => {
-                    // Print the debug representation of all explicit values.
                     writeln!(f, "{}{} = {:?}", prefix, self.identifier, vals)
                 }
                 ArrayInitializer::Fill { val, count } => {
-                    // Print the fill syntax: `name = [val; count]`.
                     writeln!(f, "{}{} = [{}; {}]", prefix, self.identifier, val, count)
                 }
             },
