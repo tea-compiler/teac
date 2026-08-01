@@ -67,8 +67,8 @@ fn tree_indent(indent_levels: &[bool], is_last: bool) -> String {
     s
 }
 
-/// Formats the root `Program` node, listing every top-level element as a
-/// child in the tree.
+/// Formats the root `Program` node, listing every `use` statement followed
+/// by every top-level element as children in the tree.
 impl DisplayAsTree for Program {
     fn fmt_tree(
         &self,
@@ -79,12 +79,34 @@ impl DisplayAsTree for Program {
         writeln!(f, "{}Program", tree_indent(indent_levels, is_last))?;
         // Build the indentation context for children.
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
-        let last_index = self.elements.len().saturating_sub(1);
+        new_indent.push(is_last);
+        // `use` statements are printed before all other top-level elements;
+        // only the very last child overall is marked as `is_last`.
+        let last_index = (self.use_stmts.len() + self.elements.len()).saturating_sub(1);
+        for (i, use_stmt) in self.use_stmts.iter().enumerate() {
+            use_stmt.fmt_tree(f, &new_indent, i == last_index)?;
+        }
         for (i, elem) in self.elements.iter().enumerate() {
-            elem.fmt_tree(f, &new_indent, i == last_index)?;
+            elem.fmt_tree(f, &new_indent, self.use_stmts.len() + i == last_index)?;
         }
         Ok(())
+    }
+}
+
+/// Prints a leaf `UseStmt <module_path>` node.
+impl DisplayAsTree for UseStmt {
+    fn fmt_tree(
+        &self,
+        f: &mut Formatter<'_>,
+        indent_levels: &[bool],
+        is_last: bool,
+    ) -> Result<(), Error> {
+        writeln!(
+            f,
+            "{}UseStmt {}",
+            tree_indent(indent_levels, is_last),
+            self.module_name
+        )
     }
 }
 
@@ -207,7 +229,7 @@ impl DisplayAsTree for FnDecl {
         if let Some(params) = &self.param_decl {
             // Extend the indentation context for the parameter subtree.
             let mut new_indent = indent_levels.to_vec();
-            new_indent.push(!is_last);
+            new_indent.push(is_last);
             writeln!(f, "{}Params:", tree_indent(&new_indent, false))?;
             params.decls.fmt_tree(f, &new_indent, true)?;
         }
@@ -242,7 +264,7 @@ impl DisplayAsTree for FnDef {
             self.fn_decl.identifier
         )?;
         let mut new_indent = indent_levels.to_vec();
-        new_indent.push(!is_last);
+        new_indent.push(is_last);
         self.stmts.fmt_tree(f, &new_indent, true)
     }
 }
