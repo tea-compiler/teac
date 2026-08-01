@@ -1,3 +1,11 @@
+//! Parsing of TeaLang statement rules.
+//!
+//! This submodule implements the [`ParseContext`] methods
+//! that lower statement-oriented parse-tree nodes into the corresponding AST
+//! types: code blocks, assignments, call statements, `if`/`else`
+//! conditionals, `while` loops, and `return`/`continue`/`break`/null
+//! statements.
+
 use crate::ast;
 
 use super::ParseContext;
@@ -18,10 +26,8 @@ impl<'a> ParseContext<'a> {
     /// * `break_stmt`      → wraps a unit [`ast::BreakStmt`]
     /// * `null_stmt`       → wraps a unit [`ast::NullStmt`]
     ///
-    /// Returns [`Error::Grammar`] if no recognisable inner rule is found.
-    ///
-    /// # Arguments
-    /// * `pair` – the `code_block_stmt` parse-tree node.
+    /// Returns [`Error::Grammar`](super::common::Error::Grammar) if no
+    /// recognisable inner rule is found.
     pub(crate) fn parse_code_block_stmt(&self, pair: Pair) -> ParseResult<Box<ast::CodeBlockStmt>> {
         let pair_for_error = pair.clone();
         for inner in pair.into_inner() {
@@ -82,13 +88,12 @@ impl<'a> ParseContext<'a> {
         Err(grammar_error("code_block_stmt", &pair_for_error))
     }
 
-    /// Parses an `assignment_stmt` node into a boxed [`ast::AssignmentStmt`].
+    /// Parses an `assignment_stmt` node (`left_val = right_val;`) into a boxed
+    /// [`ast::AssignmentStmt`].
     ///
-    /// An assignment has the form `left_val = right_val;`.  Both operands are
-    /// required; [`Error::Grammar`] is returned if either is absent.
-    ///
-    /// # Arguments
-    /// * `pair` – the `assignment_stmt` parse-tree node.
+    /// Both operands are required;
+    /// [`Error::Grammar`](super::common::Error::Grammar) is returned if either
+    /// is absent.
     fn parse_assignment_stmt(&self, pair: Pair) -> ParseResult<Box<ast::AssignmentStmt>> {
         let pair_for_error = pair.clone();
         let mut left_val = None;
@@ -113,11 +118,9 @@ impl<'a> ParseContext<'a> {
     /// Parses a `call_stmt` node into a boxed [`ast::CallStmt`].
     ///
     /// A call statement is a standalone function call used for its side
-    /// effects: `func(args);`.  Returns [`Error::Grammar`] if the expected
+    /// effects: `func(args);`.  Returns
+    /// [`Error::Grammar`](super::common::Error::Grammar) if the expected
     /// `fn_call` child is absent.
-    ///
-    /// # Arguments
-    /// * `pair` – the `call_stmt` parse-tree node.
     fn parse_call_stmt(&self, pair: Pair) -> ParseResult<Box<ast::CallStmt>> {
         let pair_for_error = pair.clone();
         for inner in pair.into_inner() {
@@ -134,10 +137,7 @@ impl<'a> ParseContext<'a> {
     /// Parses a `return_stmt` node into a boxed [`ast::ReturnStmt`].
     ///
     /// The return value is optional: `return;` and `return expr;` are both
-    /// valid.  When present, the expression is parsed as a `right_val`.
-    ///
-    /// # Arguments
-    /// * `pair` – the `return_stmt` parse-tree node.
+    /// valid.
     fn parse_return_stmt(&self, pair: Pair) -> ParseResult<Box<ast::ReturnStmt>> {
         let mut val = None;
 
@@ -157,20 +157,17 @@ impl<'a> ParseContext<'a> {
     /// if <bool_expr> { <body> } [else { <else_body> }]
     /// ```
     /// The condition is parsed as a `bool_expr` wrapped in a `BoolUnit`.
-    /// Body statements are collected into `if_stmts`; once the `else` keyword
-    /// token is encountered subsequent `code_block_stmt` nodes are collected
-    /// into `else_stmts`.
+    /// The grammar has no dedicated `else` node: body statements accumulate in
+    /// `if_stmts` until the `kw_else` token flips accumulation into
+    /// `else_stmts`.
     ///
-    /// Returns [`Error::Grammar`] if no condition is found.
-    ///
-    /// # Arguments
-    /// * `pair` – the `if_stmt` parse-tree node.
+    /// Returns [`Error::Grammar`](super::common::Error::Grammar) if no
+    /// condition is found.
     fn parse_if_stmt(&self, pair: Pair) -> ParseResult<Box<ast::IfStmt>> {
         let pair_for_error = pair.clone();
         let mut bool_unit = None;
         let mut if_stmts = Vec::new();
         let mut else_stmts = None;
-        // Track whether we have passed the `else` keyword.
         let mut in_else = false;
 
         for inner in pair.into_inner() {
@@ -178,7 +175,6 @@ impl<'a> ParseContext<'a> {
                 Rule::bool_expr => {
                     let pos = get_pos(&inner);
                     let bool_expr = self.parse_bool_expr(inner)?;
-                    // Wrap the condition expression in a BoolUnit node.
                     bool_unit = Some(Box::new(ast::BoolUnit {
                         pos,
                         inner: ast::BoolUnitInner::BoolExpr(bool_expr),
@@ -186,14 +182,12 @@ impl<'a> ParseContext<'a> {
                 }
                 Rule::code_block_stmt => {
                     if in_else {
-                        // Append to the else branch, creating the Vec on first use.
                         let else_branch = else_stmts.get_or_insert_with(Vec::new);
                         else_branch.push(*self.parse_code_block_stmt(inner)?);
                     } else {
                         if_stmts.push(*self.parse_code_block_stmt(inner)?);
                     }
                 }
-                // The `else` keyword marks the start of the else branch.
                 Rule::kw_else => {
                     in_else = true;
                 }
@@ -214,13 +208,10 @@ impl<'a> ParseContext<'a> {
     /// ```text
     /// while <bool_expr> { <body> }
     /// ```
-    /// The condition is parsed as a `bool_expr` wrapped in a `BoolUnit` and
-    /// all body statements are collected in order.
+    /// The condition is parsed as a `bool_expr` wrapped in a `BoolUnit`.
     ///
-    /// Returns [`Error::Grammar`] if no condition is found.
-    ///
-    /// # Arguments
-    /// * `pair` – the `while_stmt` parse-tree node.
+    /// Returns [`Error::Grammar`](super::common::Error::Grammar) if no
+    /// condition is found.
     fn parse_while_stmt(&self, pair: Pair) -> ParseResult<Box<ast::WhileStmt>> {
         let pair_for_error = pair.clone();
         let mut bool_unit = None;
@@ -231,7 +222,6 @@ impl<'a> ParseContext<'a> {
                 Rule::bool_expr => {
                     let pos = get_pos(&inner);
                     let bool_expr = self.parse_bool_expr(inner)?;
-                    // Wrap the condition expression in a BoolUnit node.
                     bool_unit = Some(Box::new(ast::BoolUnit {
                         pos,
                         inner: ast::BoolUnitInner::BoolExpr(bool_expr),

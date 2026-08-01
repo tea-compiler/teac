@@ -1,22 +1,20 @@
+//! Parsing of TeaLang declaration and definition rules.
+//!
+//! This submodule implements the [`ParseContext`] methods
+//! that lower declaration-oriented parse-tree nodes into the corresponding AST
+//! types: `use` statements, program elements, struct definitions, typed
+//! variable declarations and definitions (including array initialisers), and
+//! function declarations and definitions.
+
 use crate::ast;
 
 use super::common::{get_pos, grammar_error, parse_num, Pair, ParseResult, Rule};
 use super::ParseContext;
 
 impl<'a> ParseContext<'a> {
-    /// Parses a `use_stmt` parse-tree node into an [`ast::UseStmt`].
-    ///
-    /// A `use` statement has the form `use module::path;`.  The method collects
-    /// all `identifier` children and joins them with `"::"` to reconstruct the
-    /// fully-qualified module path.
-    ///
-    /// # Arguments
-    /// * `pair` – the `use_stmt` parse-tree node.
-    ///
-    /// # Returns
-    /// An [`ast::UseStmt`] containing the module path string.
+    /// Parses a `use_stmt` parse-tree node (`use module::path;`) into an
+    /// [`ast::UseStmt`].
     pub(crate) fn parse_use_stmt(&self, pair: Pair) -> ParseResult<ast::UseStmt> {
-        // Collect every identifier segment from the use path.
         let parts: Vec<&str> = pair
             .into_inner()
             .filter(|p| p.as_rule() == Rule::identifier)
@@ -31,11 +29,8 @@ impl<'a> ParseContext<'a> {
     ///
     /// A program element is one of: a variable declaration statement, a struct
     /// definition, a function declaration statement, or a function definition.
-    /// Returns `None` if the node contains no recognisable inner rule (this
-    /// should not occur in a well-formed parse tree).
-    ///
-    /// # Arguments
-    /// * `pair` – the `program_element` parse-tree node.
+    /// Returns `None` if the node contains no recognised inner rule; a
+    /// well-formed parse tree never triggers this.
     pub(crate) fn parse_program_element(
         &self,
         pair: Pair,
@@ -72,14 +67,9 @@ impl<'a> ParseContext<'a> {
         Ok(None)
     }
 
-    /// Parses a `struct_def` node into a boxed [`ast::StructDef`].
-    ///
-    /// A struct definition has the form `struct Name { field_list }`.  The
-    /// method extracts the struct name and delegates field parsing to
+    /// Parses a `struct_def` node (`struct Name { field_list }`) into a boxed
+    /// [`ast::StructDef`]; field parsing delegates to
     /// [`Self::parse_typed_var_decl_list`].
-    ///
-    /// # Arguments
-    /// * `pair` – the `struct_def` parse-tree node.
     pub(crate) fn parse_struct_def(&self, pair: Pair) -> ParseResult<Box<ast::StructDef>> {
         let mut identifier = String::new();
         let mut decls = Vec::new();
@@ -95,12 +85,6 @@ impl<'a> ParseContext<'a> {
         Ok(Box::new(ast::StructDef { identifier, decls }))
     }
 
-    /// Parses a `typed_var_decl_list` node into a `Vec` of [`ast::VarDecl`].
-    ///
-    /// Each child `typed_var_decl` node is delegated to [`Self::parse_var_decl`].
-    ///
-    /// # Arguments
-    /// * `pair` – the `typed_var_decl_list` parse-tree node.
     pub(crate) fn parse_typed_var_decl_list(&self, pair: Pair) -> ParseResult<Vec<ast::VarDecl>> {
         let mut decls = Vec::new();
         for inner in pair.into_inner() {
@@ -111,16 +95,15 @@ impl<'a> ParseContext<'a> {
         Ok(decls)
     }
 
-    /// Parses a `typed_var_decl` (or `var_decl`) node into a boxed [`ast::VarDecl`].
+    /// Parses a `typed_var_decl` (or `var_decl`) node into a boxed
+    /// [`ast::VarDecl`]: variable name, optional type specifier, and — for
+    /// array declarations — the array length.
     ///
-    /// Extracts the variable name, an optional type specifier, and—for array
-    /// declarations—the array length.  Returns [`Error::Grammar`] if the
-    /// identifier is missing.
-    ///
-    /// # Arguments
-    /// * `pair` – the `typed_var_decl` / `var_decl` parse-tree node.
+    /// Returns [`Error::Grammar`](super::common::Error::Grammar) if the
+    /// identifier child is missing.
     pub(crate) fn parse_var_decl(&self, pair: Pair) -> ParseResult<Box<ast::VarDecl>> {
-        // Keep a clone to pass to grammar_error if needed.
+        // Cloned because into_inner() consumes `pair`; error reporting still
+        // needs the node afterwards.
         let pair_for_error = pair.clone();
         let mut identifier: Option<String> = None;
         let mut type_specifier: Option<ast::TypeSpecifier> = None;
@@ -145,7 +128,6 @@ impl<'a> ParseContext<'a> {
 
         let identifier =
             identifier.ok_or_else(|| grammar_error("var_decl.identifier", &pair_for_error))?;
-        // Build the inner variant based on whether an array length was found.
         let inner = if let Some(len) = array_len {
             ast::VarDeclInner::Array(Box::new(ast::VarDeclArray { len }))
         } else {
@@ -163,12 +145,12 @@ impl<'a> ParseContext<'a> {
     ///
     /// Recognises reference types (`&T`), the built-in `i32` keyword, and
     /// user-defined composite (struct) types by their identifier.  Returns
-    /// `Ok(None)` when the node is empty or contains no recognised type rule.
-    ///
-    /// # Arguments
-    /// * `pair` – the `type_spec` parse-tree node.
+    /// `Ok(None)` when the node is empty or contains no recognised type rule,
+    /// and [`Error::Grammar`](super::common::Error::Grammar) if a reference
+    /// type is missing or has an empty inner type specifier.
     pub(crate) fn parse_type_spec(&self, pair: Pair) -> ParseResult<Option<ast::TypeSpecifier>> {
-        // Record the start position for use in the returned AST node.
+        let pair_for_error = pair.clone();
+        // Captured before `into_inner` consumes `pair`.
         let pos = get_pos(&pair);
 
         let children: Vec<_> = pair.into_inner().collect();
@@ -181,24 +163,22 @@ impl<'a> ParseContext<'a> {
                     let inner_type_spec = ref_children
                         .iter()
                         .find(|c| c.as_rule() == Rule::type_spec)
-                        .expect("Ref type_spec must have inner type_spec");
+                        .ok_or_else(|| grammar_error("ref_type.type_spec", &pair_for_error))?;
                     let inner_ts = self
                         .parse_type_spec(inner_type_spec.clone())?
-                        .expect("Ref inner type_spec must not be empty");
+                        .ok_or_else(|| grammar_error("ref_type.empty", &pair_for_error))?;
                     return Ok(Some(ast::TypeSpecifier {
                         pos,
                         inner: ast::TypeSpecifierInner::Reference(Box::new(inner_ts)),
                     }));
                 }
                 Rule::kw_i32 => {
-                    // Built-in integer type.
                     return Ok(Some(ast::TypeSpecifier {
                         pos,
                         inner: ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Int),
                     }));
                 }
                 Rule::identifier => {
-                    // User-defined composite (struct) type referenced by name.
                     return Ok(Some(ast::TypeSpecifier {
                         pos,
                         inner: ast::TypeSpecifierInner::Composite(child.as_str().to_string()),
@@ -215,11 +195,9 @@ impl<'a> ParseContext<'a> {
     ///
     /// A variable declaration statement is either a variable definition
     /// (`var_def`, e.g. `let x = 1;`) or a plain declaration (`var_decl`,
-    /// e.g. `let x: i32;`).  Returns [`Error::Grammar`] if neither child is
+    /// e.g. `let x: i32;`).  Returns
+    /// [`Error::Grammar`](super::common::Error::Grammar) if neither child is
     /// present.
-    ///
-    /// # Arguments
-    /// * `pair` – the `var_decl_stmt` parse-tree node.
     pub(crate) fn parse_var_decl_stmt(&self, pair: Pair) -> ParseResult<Box<ast::VarDeclStmt>> {
         let pair_for_error = pair.clone();
         for inner in pair.into_inner() {
@@ -247,17 +225,17 @@ impl<'a> ParseContext<'a> {
     /// contains an `array_initializer` child; a scalar definition contains a
     /// `right_val` child.  The type annotation (after `:`) is optional in both
     /// forms.
-    ///
-    /// # Arguments
-    /// * `pair` – the `var_def` parse-tree node.
     pub(crate) fn parse_var_def(&self, pair: Pair) -> ParseResult<Box<ast::VarDef>> {
         let pair_for_error = pair.clone();
         let inner_pairs: Vec<_> = pair.into_inner().collect();
 
         // The first child is always the variable name identifier.
-        let identifier = inner_pairs[0].as_str().to_string();
+        let identifier = inner_pairs
+            .first()
+            .ok_or_else(|| grammar_error("var_def.identifier", &pair_for_error))?
+            .as_str()
+            .to_string();
 
-        // Determine the form of the definition by looking for key child rules.
         let has_initializer = inner_pairs
             .iter()
             .any(|p| p.as_rule() == Rule::array_initializer);
@@ -273,7 +251,6 @@ impl<'a> ParseContext<'a> {
                     .clone(),
             )? as usize;
 
-            // Type annotation is optional; only present when a colon was found.
             let type_specifier = if has_colon {
                 self.parse_type_spec(
                     inner_pairs
@@ -334,14 +311,10 @@ impl<'a> ParseContext<'a> {
     /// Two forms are supported:
     /// * **Explicit list** – `[v0, v1, v2]`: contains a `right_val_list`.
     /// * **Fill** – `[v; N]`: contains a single `right_val` and a `num`.
-    ///
-    /// # Arguments
-    /// * `pair` – the `array_initializer` parse-tree node.
     fn parse_array_initializer(&self, pair: Pair) -> ParseResult<ast::ArrayInitializer> {
         let pair_for_error = pair.clone();
         let children: Vec<_> = pair.into_inner().collect();
 
-        // Check for the explicit-list form first.
         if let Some(list_pair) = children
             .iter()
             .find(|p| p.as_rule() == Rule::right_val_list)
@@ -350,7 +323,7 @@ impl<'a> ParseContext<'a> {
             return Ok(ast::ArrayInitializer::ExplicitList(vals));
         }
 
-        // Otherwise it must be the fill form `[val; count]`.
+        // Fill form `[val; count]`.
         let val_pair = children
             .iter()
             .find(|p| p.as_rule() == Rule::right_val)
@@ -369,10 +342,8 @@ impl<'a> ParseContext<'a> {
     /// Parses a `fn_decl_stmt` node into a boxed [`ast::FnDeclStmt`].
     ///
     /// A function declaration statement wraps a single `fn_decl` child.
-    /// Returns [`Error::Grammar`] if the expected child is absent.
-    ///
-    /// # Arguments
-    /// * `pair` – the `fn_decl_stmt` parse-tree node.
+    /// Returns [`Error::Grammar`](super::common::Error::Grammar) if the
+    /// expected child is absent.
     pub(crate) fn parse_fn_decl_stmt(&self, pair: Pair) -> ParseResult<Box<ast::FnDeclStmt>> {
         let pair_for_error = pair.clone();
         for inner in pair.into_inner() {
@@ -386,13 +357,6 @@ impl<'a> ParseContext<'a> {
         Err(grammar_error("fn_decl_stmt", &pair_for_error))
     }
 
-    /// Parses a `fn_decl` node into a boxed [`ast::FnDecl`].
-    ///
-    /// Extracts the function name, an optional parameter list, and an optional
-    /// return type specifier.
-    ///
-    /// # Arguments
-    /// * `pair` – the `fn_decl` parse-tree node.
     fn parse_fn_decl(&self, pair: Pair) -> ParseResult<Box<ast::FnDecl>> {
         let mut identifier = String::new();
         let mut param_decl = None;
@@ -417,12 +381,10 @@ impl<'a> ParseContext<'a> {
 
     /// Parses a `param_decl` node into a boxed [`ast::ParamDecl`].
     ///
-    /// A parameter declaration consists of a `typed_var_decl_list` that lists
-    /// all formal parameters with their types.  Returns [`Error::Grammar`] if
-    /// the expected child is absent.
-    ///
-    /// # Arguments
-    /// * `pair` – the `param_decl` parse-tree node.
+    /// A parameter declaration wraps a `typed_var_decl_list` holding the
+    /// formal parameters with their types.  Returns
+    /// [`Error::Grammar`](super::common::Error::Grammar) if the expected child
+    /// is absent.
     fn parse_param_decl(&self, pair: Pair) -> ParseResult<Box<ast::ParamDecl>> {
         let pair_for_error = pair.clone();
         for inner in pair.into_inner() {
@@ -439,10 +401,8 @@ impl<'a> ParseContext<'a> {
     ///
     /// A function definition contains a `fn_decl` header followed by one or
     /// more `code_block_stmt` nodes that form the function body.  Returns
-    /// [`Error::Grammar`] if the `fn_decl` child is absent.
-    ///
-    /// # Arguments
-    /// * `pair` – the `fn_def` parse-tree node.
+    /// [`Error::Grammar`](super::common::Error::Grammar) if the `fn_decl`
+    /// child is absent.
     pub(crate) fn parse_fn_def(&self, pair: Pair) -> ParseResult<Box<ast::FnDef>> {
         let pair_for_error = pair.clone();
         let mut fn_decl = None;
@@ -451,7 +411,6 @@ impl<'a> ParseContext<'a> {
         for inner in pair.into_inner() {
             match inner.as_rule() {
                 Rule::fn_decl => fn_decl = Some(self.parse_fn_decl(inner)?),
-                // Each statement in the body is collected in order.
                 Rule::code_block_stmt => stmts.push(*self.parse_code_block_stmt(inner)?),
                 _ => {}
             }
