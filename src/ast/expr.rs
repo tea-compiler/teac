@@ -174,14 +174,12 @@ pub struct FnCall {
     pub vals: RightValList,
 }
 
-/// Implementation of helper methods for function calls.
 impl FnCall {
     /// Returns the fully-qualified function name, including the module prefix
     /// if one is present (e.g., `"io::print"`), or just the bare function
     /// name otherwise (e.g., `"print"`).
     pub fn qualified_name(&self) -> String {
         if let Some(module) = &self.module_prefix {
-            // Combine module prefix and function name with `::` separator.
             format!("{module}::{}", self.name)
         } else {
             self.name.clone()
