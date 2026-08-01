@@ -1,3 +1,6 @@
+//! Size and alignment computation for IR data types, including struct
+//! field offsets, following the layout rules the backend emits code for.
+
 use crate::asm::error::Error;
 use crate::ir;
 use std::collections::HashMap;

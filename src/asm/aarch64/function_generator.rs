@@ -1,9 +1,13 @@
+//! Instruction selection: lowers IR statements to AArch64 instructions
+//! over virtual registers, including ABI handling for arguments, calls,
+//! and returns.
+
 use super::aapcs::{classify_args, ArgumentLocation};
 use super::frame::{outgoing_arg_addr, outgoing_stack_bytes, FrameLayout};
 use super::inst::Instruction;
 use super::phi_lowering::{self, ParallelCopy, SplitEdge};
 use super::types::{
-    Addr, BinOp, Cond, IndexOperand, Operand, Register, RegisterSize, REG_IP0, REG_X0,
+    Addr, Cond, InstBinOp, InstOperand, Register, RegisterSize, REG_IP0, REG_X0,
 };
 use crate::asm::common::{StackSlot, StructLayouts};
 use crate::asm::error::Error;
@@ -29,7 +33,7 @@ pub enum PtrBase {
     Register(usize),
 }
 
-pub struct FunctionGenerator<'a> {
+pub struct AsmFunctionGenerator<'a> {
     func_id: &'a str,
     frame: &'a FrameLayout,
     layouts: &'a StructLayouts,
@@ -39,7 +43,7 @@ pub struct FunctionGenerator<'a> {
     cond_map: HashMap<usize, Cond>,
 }
 
-impl<'a> FunctionGenerator<'a> {
+impl<'a> AsmFunctionGenerator<'a> {
     /// Creates a generator for one function body.  `next_vreg` seeds the
     /// virtual-register counter from the IR body's high-water mark so the
     /// copies introduced during phi lowering get fresh ids.
@@ -167,15 +171,15 @@ impl<'a> FunctionGenerator<'a> {
         let addr = self.lower_ptr_as_addr(&s.ptr)?;
 
         match src {
-            Operand::Register(r) => {
+            InstOperand::Register(r) => {
                 self.insts.push(Instruction::Str { size, src: r, addr });
             }
-            Operand::Immediate(imm) => {
+            InstOperand::Immediate(imm) => {
                 let tmp = self.fresh_vreg();
                 self.insts.push(Instruction::Mov {
                     size,
                     dst: Register::Virtual(tmp),
-                    src: Operand::Immediate(imm),
+                    src: InstOperand::Immediate(imm),
                 });
                 self.insts.push(Instruction::Str {
                     size,
@@ -451,11 +455,11 @@ impl<'a> FunctionGenerator<'a> {
                 });
                 if offset != 0 {
                     self.insts.push(Instruction::BinOp {
-                        op: BinOp::Add,
+                        op: InstBinOp::Add,
                         size: RegisterSize::X64,
                         dst: Register::Virtual(dst),
                         lhs: Register::Virtual(dst),
-                        rhs: Operand::Immediate(offset),
+                        rhs: InstOperand::Immediate(offset),
                     });
                 }
             }
@@ -528,13 +532,13 @@ impl<'a> FunctionGenerator<'a> {
 
         let (op, size) = self.lower_value(arg)?;
         let src_reg = match op {
-            Operand::Register(r) => r,
-            Operand::Immediate(imm) => {
+            InstOperand::Register(r) => r,
+            InstOperand::Immediate(imm) => {
                 let scratch = Register::Physical(REG_IP0);
                 self.insts.push(Instruction::Mov {
                     size,
                     dst: scratch,
-                    src: Operand::Immediate(imm),
+                    src: InstOperand::Immediate(imm),
                 });
                 scratch
             }
@@ -549,9 +553,10 @@ impl<'a> FunctionGenerator<'a> {
 
     /// Lifts the AAPCS64 return value out of `x0` (or `s0` for FP
     /// returns) into the vreg named by `res`.  Dispatch is driven by
-    /// the return dtype's [`RegSize`], so adding a new scalar class
-    /// (e.g. `Dtype::F32 -> RegSize::S32`) requires only that
-    /// `RegisterSize`'s `TryFrom<&ir::Dtype>` learns the new mapping.
+    /// the return dtype's [`RegisterSize`], so adding a new scalar
+    /// class (e.g. `Dtype::F32 -> RegisterSize::S32`) requires only
+    /// that `RegisterSize`'s `TryFrom<&ir::Dtype>` learns the new
+    /// mapping.
     fn emit_call_result(&mut self, res: &ir::Local) -> Result<(), Error> {
         let dst = Register::Virtual(res.id.0);
         let size = RegisterSize::try_from(&res.dtype)?;
@@ -566,7 +571,7 @@ impl<'a> FunctionGenerator<'a> {
                 self.insts.push(Instruction::Mov {
                     size: RegisterSize::X64,
                     dst,
-                    src: Operand::Register(Register::Virtual(v)),
+                    src: InstOperand::Register(Register::Virtual(v)),
                 });
             }
             PtrBase::Stack => {
@@ -586,9 +591,9 @@ impl<'a> FunctionGenerator<'a> {
         Ok(())
     }
 
-    fn lower_int(&self, val: &ir::Operand) -> Result<Operand, Error> {
+    fn lower_int(&self, val: &ir::Operand) -> Result<InstOperand, Error> {
         match val {
-            ir::Operand::Const(c) => Ok(Operand::Immediate(c.val)),
+            ir::Operand::Const(c) => Ok(InstOperand::Immediate(c.val)),
             ir::Operand::Local(l) => {
                 if !matches!(l.dtype, ir::Dtype::I1 | ir::Dtype::I32) {
                     return Err(Error::UnsupportedDtype {
@@ -600,7 +605,7 @@ impl<'a> FunctionGenerator<'a> {
                         what: format!("int operand references alloca pointer %r{}", l.id.0),
                     });
                 }
-                Ok(Operand::Register(Register::Virtual(l.id.0)))
+                Ok(InstOperand::Register(Register::Virtual(l.id.0)))
             }
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: format!("unsupported int operand: {}", val),
@@ -610,22 +615,22 @@ impl<'a> FunctionGenerator<'a> {
 
     fn lower_int_to_reg(&mut self, val: &ir::Operand) -> Result<Register, Error> {
         match self.lower_int(val)? {
-            Operand::Register(r) => Ok(r),
-            Operand::Immediate(imm) => {
+            InstOperand::Register(r) => Ok(r),
+            InstOperand::Immediate(imm) => {
                 let tmp = self.fresh_vreg();
                 self.insts.push(Instruction::Mov {
                     size: RegisterSize::W32,
                     dst: Register::Virtual(tmp),
-                    src: Operand::Immediate(imm),
+                    src: InstOperand::Immediate(imm),
                 });
                 Ok(Register::Virtual(tmp))
             }
         }
     }
 
-    fn lower_value(&self, val: &ir::Operand) -> Result<(Operand, RegisterSize), Error> {
+    fn lower_value(&self, val: &ir::Operand) -> Result<(InstOperand, RegisterSize), Error> {
         match val {
-            ir::Operand::Const(c) => Ok((Operand::Immediate(c.val), RegisterSize::W32)),
+            ir::Operand::Const(c) => Ok((InstOperand::Immediate(c.val), RegisterSize::W32)),
             ir::Operand::Local(l) => {
                 let size = match &l.dtype {
                     ir::Dtype::I1 | ir::Dtype::I32 => RegisterSize::W32,
@@ -646,7 +651,7 @@ impl<'a> FunctionGenerator<'a> {
                         })
                     }
                 };
-                Ok((Operand::Register(Register::Virtual(l.id.0)), size))
+                Ok((InstOperand::Register(Register::Virtual(l.id.0)), size))
             }
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: "unexpected global variable in value position".into(),
@@ -673,18 +678,16 @@ impl<'a> FunctionGenerator<'a> {
         match val {
             ir::Operand::Local(l) => {
                 let vreg_index = l.id.0;
-                // Check if this local is a stack allocation (alloca).
-                // Allocas have their address implicitly defined by their stack slot,
-                // rather than being stored in a register.
+                // An alloca's address is its stack slot, not a value held
+                // in a register.
                 if let Some(slot) = self.frame.alloca_slot(vreg_index) {
                     return Ok((PtrBase::Stack, Some(slot)));
                 }
-                // Otherwise, if it's a pointer type, the pointer value itself
-                // lives in a virtual register (e.g., result of a GEP or load).
+                // A non-alloca pointer local holds its address in a virtual
+                // register (e.g., the result of a GEP or load).
                 if matches!(l.dtype, ir::Dtype::Pointer { .. }) {
                     return Ok((PtrBase::Register(vreg_index), None));
                 }
-                // Non-pointer locals cannot be used as pointer operands.
                 Err(Error::UnsupportedDtype {
                     dtype: l.dtype.clone(),
                 })
@@ -699,9 +702,9 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
 
-    fn lower_index(&self, val: &ir::Operand) -> Result<IndexOperand, Error> {
+    fn lower_index(&self, val: &ir::Operand) -> Result<InstOperand, Error> {
         match val {
-            ir::Operand::Const(c) => Ok(IndexOperand::Imm(c.val)),
+            ir::Operand::Const(c) => Ok(InstOperand::Immediate(c.val)),
             ir::Operand::Local(l) => {
                 if !matches!(l.dtype, ir::Dtype::I1 | ir::Dtype::I32) {
                     return Err(Error::UnsupportedDtype {
@@ -713,7 +716,7 @@ impl<'a> FunctionGenerator<'a> {
                         what: format!("index operand references alloca pointer %r{}", l.id.0),
                     });
                 }
-                Ok(IndexOperand::Reg(Register::Virtual(l.id.0)))
+                Ok(InstOperand::Register(Register::Virtual(l.id.0)))
             }
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: format!("unsupported index operand: {}", val),
@@ -761,8 +764,8 @@ impl<'a> FunctionGenerator<'a> {
         let size = RegisterSize::try_from(dst.dtype())?;
 
         let src_op = match src {
-            ir::Operand::Const(c) => Operand::Immediate(c.val),
-            ir::Operand::Local(l) => Operand::Register(Register::Virtual(l.id.0)),
+            ir::Operand::Const(c) => InstOperand::Immediate(c.val),
+            ir::Operand::Local(l) => InstOperand::Register(Register::Virtual(l.id.0)),
             ir::Operand::Global(_) => {
                 return Err(Error::UnsupportedOperand {
                     what: "global variable in phi copy".into(),
@@ -801,12 +804,12 @@ impl<'a> FunctionGenerator<'a> {
     }
 }
 
-fn arith_op_to_binop(op: &ir::stmt::ArithBinOp) -> BinOp {
+fn arith_op_to_binop(op: &ir::stmt::ArithBinOp) -> InstBinOp {
     match op {
-        ir::stmt::ArithBinOp::Add => BinOp::Add,
-        ir::stmt::ArithBinOp::Sub => BinOp::Sub,
-        ir::stmt::ArithBinOp::Mul => BinOp::Mul,
-        ir::stmt::ArithBinOp::SDiv => BinOp::SDiv,
+        ir::stmt::ArithBinOp::Add => InstBinOp::Add,
+        ir::stmt::ArithBinOp::Sub => InstBinOp::Sub,
+        ir::stmt::ArithBinOp::Mul => InstBinOp::Mul,
+        ir::stmt::ArithBinOp::SDiv => InstBinOp::SDiv,
     }
 }
 
@@ -815,7 +818,7 @@ fn arith_op_to_binop(op: &ir::stmt::ArithBinOp) -> BinOp {
 /// and `s0` for floating-point returns.  Selection is driven by
 /// `size` so that adding a new scalar class only requires
 /// `RegisterSize`'s `TryFrom<&ir::Dtype>` to learn the new mapping.
-fn return_inst(size: RegisterSize, src: Operand) -> Instruction {
+fn return_inst(size: RegisterSize, src: InstOperand) -> Instruction {
     match size {
         RegisterSize::W32 | RegisterSize::X64 => Instruction::Mov {
             size,
@@ -836,7 +839,7 @@ fn return_value_load(size: RegisterSize, dst: Register) -> Instruction {
         RegisterSize::W32 | RegisterSize::X64 => Instruction::Mov {
             size,
             dst,
-            src: Operand::Register(Register::Physical(REG_X0)),
+            src: InstOperand::Register(Register::Physical(REG_X0)),
         },
         RegisterSize::S32 => todo!(
             "asmt-4: lift an f32 call result out of the FP return register `s0` \

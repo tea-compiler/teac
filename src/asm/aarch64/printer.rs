@@ -1,41 +1,18 @@
+//! Textual emitter for the finalized instruction stream: resolves
+//! register names and immediate encodings (falling back to scratch
+//! registers where an operand does not fit), and orchestrates
+//! whole-program assembly output — sections, globals, and functions.
+
 use std::io::Write;
 
 use super::frame::SCRATCH_SPILL_SLOT;
 use super::inst::Instruction;
 use super::types::{
-    Addr, BinOp, Cond, FBinOp, IndexOperand, Operand, RegisterSize, Register, SCRATCH0, SCRATCH1,
+    Addr, Cond, FBinOp, InstBinOp, InstOperand, RegisterSize, Register, SCRATCH0, SCRATCH1,
 };
+use super::{GeneratedFunction, GeneratedGlobal, GlobalData};
 use crate::asm::error::Error;
 use crate::common::Target;
-
-pub trait AsmPrint {
-    fn emit_inst(&mut self, inst: &Instruction) -> Result<(), Error>;
-
-    fn emit_insts(&mut self, insts: &[Instruction]) -> Result<(), Error> {
-        for inst in insts {
-            self.emit_inst(inst)?;
-        }
-        Ok(())
-    }
-
-    fn emit_sub_sp(&mut self, imm: i64) -> Result<(), Error>;
-
-    fn emit_global(&mut self, sym: &str) -> Result<(), Error>;
-
-    fn emit_align(&mut self, power: u32) -> Result<(), Error>;
-
-    fn emit_label(&mut self, name: &str) -> Result<(), Error>;
-
-    fn emit_prologue(&mut self, frame_size: i64) -> Result<(), Error>;
-
-    fn emit_section(&mut self, name: &str) -> Result<(), Error>;
-
-    fn emit_word(&mut self, value: i64) -> Result<(), Error>;
-
-    fn emit_zero(&mut self, bytes: i64) -> Result<(), Error>;
-
-    fn emit_newline(&mut self) -> Result<(), Error>;
-}
 
 pub struct AsmPrinter<W: Write> {
     writer: W,
@@ -61,6 +38,59 @@ impl<W: Write> AsmPrinter<W> {
     /// (`d18`–`d25`) around its calls.
     pub fn set_uses_fp(&mut self, uses_fp: bool) {
         self.current_fn_uses_fp = uses_fp;
+    }
+
+    /// Emits the complete assembly file: a `.data` section holding
+    /// every global (when any exist), then the `.text` section with
+    /// every function.  The single source of truth for what a teac `.s`
+    /// file looks like; `AArch64AsmGenerator::output` delegates here
+    /// wholesale, mirroring how the ir layer's `output` delegates to
+    /// [`crate::ir::printer::IrPrinter::emit_module`].
+    pub fn emit_program(
+        &mut self,
+        globals: &[GeneratedGlobal],
+        functions: &[GeneratedFunction],
+    ) -> Result<(), Error> {
+        if !globals.is_empty() {
+            self.emit_section("data")?;
+            for g in globals {
+                self.emit_global(&g.symbol)?;
+                self.emit_align(2)?;
+                self.emit_label(&g.symbol)?;
+                match &g.data {
+                    GlobalData::Word { value } => self.emit_word(*value)?,
+                    GlobalData::Array { words, zero_bytes } => {
+                        for v in words {
+                            self.emit_word(*v)?;
+                        }
+                        if *zero_bytes > 0 {
+                            self.emit_zero(*zero_bytes)?;
+                        }
+                    }
+                }
+            }
+            self.emit_newline()?;
+        }
+
+        self.emit_section("text")?;
+        for func in functions {
+            self.emit_function(func)?;
+        }
+
+        Ok(())
+    }
+
+    /// Emits one function: symbol directive, alignment, label, the
+    /// FP-usage bracket flag, prologue, the finalized instruction
+    /// stream, and a trailing blank line.
+    pub fn emit_function(&mut self, func: &GeneratedFunction) -> Result<(), Error> {
+        self.emit_global(&func.symbol)?;
+        self.emit_align(2)?;
+        self.emit_label(&func.symbol)?;
+        self.set_uses_fp(func.uses_fp);
+        self.emit_prologue(func.frame_size)?;
+        self.emit_insts(&func.insts)?;
+        self.emit_newline()
     }
 
     fn reg_name(&self, r: Register, size: RegisterSize) -> String {
@@ -158,19 +188,19 @@ impl<W: Write> AsmPrinter<W> {
     /// [`emit_add_x_imm_with`]: when `scratch == dst`, the initial `mov`
     /// overwrites `dst` with `#imm`, and the subsequent `add dst, base,
     /// dst` still computes `base + imm` correctly because `dst` carries
-    /// `imm` at that point.  Do not use this helper for any other op
-    /// sequence — the identity does not generalise.
+    /// `imm` at that point.  Using this helper for any other op
+    /// sequence is unsound — the identity does not generalise.
     fn pick_scratch_or_clobber_dst(&self, regs: &[Register], dst: Register) -> Register {
         self.pick_free_scratch(regs).unwrap_or(dst)
     }
 
-    fn emit_mov(&mut self, size: RegisterSize, dst: Register, src: Operand) -> Result<(), Error> {
+    fn emit_mov(&mut self, size: RegisterSize, dst: Register, src: InstOperand) -> Result<(), Error> {
         let dst_s = self.reg_name(dst, size);
         match src {
-            Operand::Immediate(imm) => {
+            InstOperand::Immediate(imm) => {
                 writeln!(self.writer, "\tmov {dst_s}, #{imm}")?;
             }
-            Operand::Register(r) => {
+            InstOperand::Register(r) => {
                 let src_s = self.reg_name(r, size);
                 writeln!(self.writer, "\tmov {dst_s}, {src_s}")?;
             }
@@ -180,22 +210,22 @@ impl<W: Write> AsmPrinter<W> {
 
     fn emit_binop(
         &mut self,
-        op: BinOp,
+        op: InstBinOp,
         size: RegisterSize,
         dst: Register,
         lhs: Register,
-        rhs: Operand,
+        rhs: InstOperand,
     ) -> Result<(), Error> {
         let dst_s = self.reg_name(dst, size);
         let lhs_s = self.reg_name(lhs, size);
 
         match (op, rhs) {
-            (BinOp::Add | BinOp::Sub, Operand::Immediate(imm)) => {
+            (InstBinOp::Add | InstBinOp::Sub, InstOperand::Immediate(imm)) => {
                 let (op_mn, imm_abs) = match (op, imm < 0) {
-                    (BinOp::Add, true) => ("sub", -imm),
-                    (BinOp::Sub, true) => ("add", -imm),
-                    (BinOp::Add, false) => ("add", imm),
-                    (BinOp::Sub, false) => ("sub", imm),
+                    (InstBinOp::Add, true) => ("sub", -imm),
+                    (InstBinOp::Sub, true) => ("add", -imm),
+                    (InstBinOp::Add, false) => ("add", imm),
+                    (InstBinOp::Sub, false) => ("sub", imm),
                     _ => unreachable!(),
                 };
                 if self.is_addsub_imm_encodable(imm_abs) {
@@ -204,26 +234,26 @@ impl<W: Write> AsmPrinter<W> {
                     self.emit_op_via_imm_scratch(op_mn, size, dst, lhs, imm_abs as u64)?;
                 }
             }
-            (BinOp::Add, Operand::Register(r)) => {
+            (InstBinOp::Add, InstOperand::Register(r)) => {
                 let rhs_s = self.reg_name(r, size);
                 writeln!(self.writer, "\tadd {dst_s}, {lhs_s}, {rhs_s}")?;
             }
-            (BinOp::Sub, Operand::Register(r)) => {
+            (InstBinOp::Sub, InstOperand::Register(r)) => {
                 let rhs_s = self.reg_name(r, size);
                 writeln!(self.writer, "\tsub {dst_s}, {lhs_s}, {rhs_s}")?;
             }
-            (BinOp::Mul, Operand::Register(r)) => {
+            (InstBinOp::Mul, InstOperand::Register(r)) => {
                 let rhs_s = self.reg_name(r, size);
                 writeln!(self.writer, "\tmul {dst_s}, {lhs_s}, {rhs_s}")?;
             }
-            (BinOp::Mul, Operand::Immediate(imm)) => {
+            (InstBinOp::Mul, InstOperand::Immediate(imm)) => {
                 self.emit_op_via_imm_scratch("mul", size, dst, lhs, imm as u64)?;
             }
-            (BinOp::SDiv, Operand::Register(r)) => {
+            (InstBinOp::SDiv, InstOperand::Register(r)) => {
                 let rhs_s = self.reg_name(r, size);
                 writeln!(self.writer, "\tsdiv {dst_s}, {lhs_s}, {rhs_s}")?;
             }
-            (BinOp::SDiv, Operand::Immediate(imm)) => {
+            (InstBinOp::SDiv, InstOperand::Immediate(imm)) => {
                 self.emit_op_via_imm_scratch("sdiv", size, dst, lhs, imm as u64)?;
             }
         }
@@ -375,14 +405,14 @@ impl<W: Write> AsmPrinter<W> {
         &mut self,
         dst: Register,
         base: Register,
-        index: IndexOperand,
+        index: InstOperand,
         scale: i64,
     ) -> Result<(), Error> {
         let dst_s = self.reg_name(dst, RegisterSize::X64);
         let base_s = self.reg_name(base, RegisterSize::X64);
 
         match index {
-            IndexOperand::Imm(i) => {
+            InstOperand::Immediate(i) => {
                 let off = i * scale;
                 if off == 0 {
                     writeln!(self.writer, "\tmov {dst_s}, {base_s}")?;
@@ -391,7 +421,7 @@ impl<W: Write> AsmPrinter<W> {
                     self.emit_add_x_imm_with(dst, base, off, scratch)?;
                 }
             }
-            IndexOperand::Reg(r) => {
+            InstOperand::Register(r) => {
                 let idx_s = self.reg_name(r, RegisterSize::W32);
 
                 if let Some(shift) = self.scale_to_shift(scale) {
@@ -429,10 +459,10 @@ impl<W: Write> AsmPrinter<W> {
                 {
                     // `dst == base` and the shared register lives in one
                     // of the scratch slots.  The other scratch is free,
-                    // but we still need a third register for the partial
-                    // product; bounce the original `base` value through
-                    // the stack so its register can be reused as the
-                    // sxtw/mul accumulator.
+                    // but a third register is still required for the
+                    // partial product; bounce the original `base` value
+                    // through the stack so its register can be reused as
+                    // the sxtw/mul accumulator.
                     let other = if matches!(base, Register::Physical(r) if r == SCRATCH0) {
                         Register::Physical(SCRATCH1)
                     } else {
@@ -461,16 +491,16 @@ impl<W: Write> AsmPrinter<W> {
         Ok(())
     }
 
-    fn emit_cmp(&mut self, size: RegisterSize, lhs: Register, rhs: Operand) -> Result<(), Error> {
+    fn emit_cmp(&mut self, size: RegisterSize, lhs: Register, rhs: InstOperand) -> Result<(), Error> {
         let lhs_s = self.reg_name(lhs, size);
         match rhs {
-            Operand::Register(r) => {
+            InstOperand::Register(r) => {
                 writeln!(self.writer, "\tcmp {lhs_s}, {}", self.reg_name(r, size))?
             }
-            Operand::Immediate(imm) if self.is_addsub_imm_encodable(imm) => {
+            InstOperand::Immediate(imm) if self.is_addsub_imm_encodable(imm) => {
                 writeln!(self.writer, "\tcmp {lhs_s}, #{imm}")?
             }
-            Operand::Immediate(imm) => {
+            InstOperand::Immediate(imm) => {
                 let scratch_reg = if matches!(lhs, Register::Physical(r) if r == SCRATCH0) {
                     Register::Physical(SCRATCH1)
                 } else {
@@ -513,7 +543,8 @@ impl<W: Write> AsmPrinter<W> {
         let chunk2 = ((value >> 32) & 0xFFFF) as u16;
         let chunk3 = ((value >> 48) & 0xFFFF) as u16;
 
-        // Find the first non-zero chunk to use movz
+        // The first non-zero 16-bit chunk is emitted with movz (which
+        // zeroes the rest of the register); later chunks merge with movk.
         let mut first = true;
         if chunk0 != 0 || (chunk1 == 0 && chunk2 == 0 && chunk3 == 0) {
             writeln!(self.writer, "\tmovz {reg}, #{chunk0}")?;
@@ -627,7 +658,7 @@ impl<W: Write> AsmPrinter<W> {
 
     /// Emits `fmov s_d, s_n` (Fpr-to-Fpr) or `fmov s_d, w_n`
     /// (Gpr-to-Fpr) depending on the source operand's register class.
-    fn emit_fmov(&mut self, _dst: Register, _src: Operand) -> Result<(), Error> {
+    fn emit_fmov(&mut self, _dst: Register, _src: InstOperand) -> Result<(), Error> {
         todo!("asmt-4: emit fmov s_d, {{s|w}}_n")
     }
 
@@ -680,23 +711,20 @@ impl<W: Write> AsmPrinter<W> {
         Ok(())
     }
 
-    /// Inverse of [`<Self as AsmPrint>::emit_prologue`]: restores
-    /// `sp` to its post-prologue position (i.e. discards the local
-    /// frame), pops the saved fp/lr pair, and branches to the link
-    /// register.  Emitted by the [`Instruction::Ret`] arm of
-    /// [`<Self as AsmPrint>::emit_inst`].
+    /// Inverse of [`Self::emit_prologue`]: restores `sp` to its
+    /// post-prologue position (i.e. discards the local frame), pops the
+    /// saved fp/lr pair, and branches to the link register.  Emitted by
+    /// the [`Instruction::Ret`] arm of [`Self::emit_inst`].
     fn emit_epilogue(&mut self) -> Result<(), Error> {
         writeln!(self.writer, "\tmov sp, x29")?;
         writeln!(self.writer, "\tldp x29, x30, [sp], #16")?;
         writeln!(self.writer, "\tret")?;
         Ok(())
     }
-}
 
-impl<W: Write> AsmPrint for AsmPrinter<W> {
     fn emit_inst(&mut self, inst: &Instruction) -> Result<(), Error> {
         match inst {
-            Instruction::Label(name) => writeln!(self.writer, "{name}:")?,
+            Instruction::Label(name) => self.emit_label(name)?,
             Instruction::Mov { size, dst, src } => self.emit_mov(*size, *dst, *src)?,
             Instruction::BinOp {
                 op,
@@ -730,6 +758,13 @@ impl<W: Write> AsmPrint for AsmPrinter<W> {
             Instruction::SubSp { imm } => self.emit_sub_sp(*imm)?,
             Instruction::AddSp { imm } => self.emit_add_sp(*imm)?,
             Instruction::Ret => self.emit_epilogue()?,
+        }
+        Ok(())
+    }
+
+    fn emit_insts(&mut self, insts: &[Instruction]) -> Result<(), Error> {
+        for inst in insts {
+            self.emit_inst(inst)?;
         }
         Ok(())
     }

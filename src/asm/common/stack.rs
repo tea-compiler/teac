@@ -1,3 +1,7 @@
+//! Virtual stack-frame builder: assigns alloca and register-spill slots
+//! at negative offsets from the frame pointer and tracks the total size
+//! as the frame grows.
+
 use super::{align_up, StructLayouts};
 use crate::asm::error::Error;
 use crate::ir;

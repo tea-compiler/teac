@@ -1,3 +1,8 @@
+//! SSA phi elimination planning: computes the parallel copies each
+//! control-flow edge needs, splits critical edges into fresh blocks,
+//! and retargets terminators so the function generator can emit the
+//! plan as straight-line instructions.
+
 use std::collections::HashMap;
 
 use crate::ir::function::{BasicBlock, BlockLabel};

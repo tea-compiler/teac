@@ -1,3 +1,6 @@
+//! Target-independent support utilities for the assembly backend:
+//! data-type layout computation and virtual stack-frame management.
+
 mod layout;
 mod stack;
 

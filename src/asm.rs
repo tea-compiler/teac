@@ -1,5 +1,5 @@
-//! This module provides the assembly code generation backend,
-//! translating the compiler's IR into target-specific assembly.
+//! Assembly code generation backend: translates the compiler's IR
+//! into target-specific assembly.
 
 pub mod aarch64;
 pub mod common;
