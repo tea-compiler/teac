@@ -4,7 +4,7 @@
 //! nodes that appear in variable declarations, function parameters, and
 //! return-type annotations.
 
-/// Byte offset (or character index) into the source text.
+/// Byte offset into the source text.
 /// Used to track where each AST node originated for error reporting.
 pub type Pos = usize;
 
