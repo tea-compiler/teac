@@ -84,8 +84,8 @@ impl Display for GlobalRef {
 
 /// A typed integer constant operand.
 ///
-/// The value is stored as `i64` to leave room for constants wider than i32
-/// (e.g. pointer-sized indices) once the IR supports them.
+/// The value is stored as `i64` to leave room for constants wider than `i32`
+/// (e.g. pointer-sized indices).
 #[derive(Clone)]
 pub struct IntConst {
     pub dtype: Dtype,
@@ -131,7 +131,7 @@ impl Operand {
 
     /// True for any operand other than an integer constant — i.e. anything
     /// that denotes a named vreg or a global symbol and could therefore
-    /// hold an address.  The front-end pairs this predicate with a
+    /// hold an address.  IR lowering pairs this predicate with a
     /// separate `Dtype::Pointer` check to decide whether to insert an
     /// implicit load at a value-use site.
     pub fn is_addressable(&self) -> bool {

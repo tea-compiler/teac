@@ -8,15 +8,10 @@
 use crate::ast;
 use crate::ir::types::Dtype;
 
-/// Converts an optional AST type specifier into the corresponding base IR data type (`Dtype`).
-///
-/// Delegates to `Dtype::from(&TypeSpecifier)` when a specifier is present;
-/// defaults to `Dtype::I32` when absent.
-///
-/// This function is used for **global variables** and **function parameters** where
-/// an absent type annotation defaults to `i32`.  Local variables are handled by the
-/// separate type inference pass (`type_infer::infer_function`), which resolves their
-/// types before IR generation.
+/// Base [`Dtype`] for **global variables** and **function parameters**, where
+/// an absent type annotation defaults to `i32`.  Local variables get their
+/// types from the separate inference pass (`type_infer::infer_function`)
+/// before IR generation.
 fn base_dtype(type_specifier: Option<&ast::TypeSpecifier>) -> Dtype {
     type_specifier.map_or(Dtype::I32, Dtype::from)
 }
@@ -42,12 +37,6 @@ pub(crate) fn compose_var_def_dtype(base: Dtype, inner: &ast::VarDefInner) -> Dt
         ast::VarDefInner::Array(arr) => Dtype::array_of(base, arr.len),
     }
 }
-
-// ---------------------------------------------------------------------------
-// `From` trait implementations: AST TypeSpecifier -> IR Dtype
-// ---------------------------------------------------------------------------
-//
-// These provide infallible conversions from AST type specifiers to IR types.
 
 /// Converts an owned `ast::TypeSpecifier` into a `Dtype` by delegating to the
 /// by-reference implementation.
@@ -78,18 +67,7 @@ impl From<&ast::TypeSpecifier> for Dtype {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `TryFrom` trait implementations: AST declarations -> IR Dtype
-// ---------------------------------------------------------------------------
-//
-// These are fallible conversions because certain combinations (e.g., struct
-// definitions with initializers) are not supported and produce an error.
-
-/// Converts a variable declaration (`VarDecl`) to its IR data type.
-///
-/// First resolves the base type from the optional type specifier, then wraps it
-/// in an array type if the declaration is for an array (with a known length),
-/// or returns the base type directly for scalar declarations.
+/// Storage [`Dtype`] of a global-variable or function-parameter declaration.
 impl TryFrom<&ast::VarDecl> for Dtype {
     type Error = crate::ir::Error;
 
@@ -101,9 +79,9 @@ impl TryFrom<&ast::VarDecl> for Dtype {
 
 /// Converts a variable definition (`VarDef`) to its IR data type.
 ///
-/// Similar to the `VarDecl` conversion, but additionally rejects struct types
-/// with initializers—struct variables cannot be initialized inline, so
-/// attempting to do so returns `Error::StructInitialization`.
+/// Rejects struct-typed definitions: a `VarDef` always carries an initializer
+/// and struct variables cannot be initialized inline, so the conversion
+/// returns `Error::StructInitialization`.
 impl TryFrom<&ast::VarDef> for Dtype {
     type Error = crate::ir::Error;
 
@@ -116,10 +94,8 @@ impl TryFrom<&ast::VarDef> for Dtype {
     }
 }
 
-/// Converts a variable declaration statement (`VarDeclStmt`) to its IR data type.
-///
-/// Delegates to the `TryFrom<&VarDecl>` or `TryFrom<&VarDef>` implementation
-/// depending on whether the statement is a pure declaration or a definition.
+/// Converts a variable declaration statement (`VarDeclStmt`) to its IR data
+/// type — the entry point used when typing global variables.
 impl TryFrom<&ast::VarDeclStmt> for Dtype {
     type Error = crate::ir::Error;
 
