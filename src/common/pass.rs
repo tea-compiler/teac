@@ -20,15 +20,11 @@
 //! [`crate::ir::pass::ModulePassManager`] in the IR layer — that runs a list
 //! of boxed trait objects in registration order.
 //!
-//! Note that this module remains IR-coupled through
-//! [`FunctionPass`]/[`Function`]; that is accepted because `common` is a
-//! crate-internal utility layer, not a public API surface.
+//! This module remains IR-coupled through [`FunctionPass`]/[`Function`];
+//! the coupling is accepted because `common` is a crate-internal utility
+//! layer, not a public API surface.
 
 use crate::ir::Function;
-
-// ---------------------------------------------------------------------------
-// Function-level passes
-// ---------------------------------------------------------------------------
 
 /// A pass that runs on a single IR [`Function`].
 ///

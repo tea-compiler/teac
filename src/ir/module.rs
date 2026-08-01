@@ -64,9 +64,9 @@ impl<'a> IrGenerator<'a> {
     }
 
     /// Append a module-level pass to the pipeline.
-    //
-    // `#[allow(dead_code)]` because the only in-tree caller is gated on
-    // the `return-type-inference` feature.
+    ///
+    /// `#[allow(dead_code)]` because the only in-tree caller is gated on
+    /// the `return-type-inference` feature.
     #[allow(dead_code)]
     pub fn add_module_pass(&mut self, pass: Box<dyn ModulePass>) {
         self.module_passes.add_pass(pass);

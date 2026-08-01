@@ -68,7 +68,6 @@ pub(crate) fn compute_link_name(source_name: &str, is_external: bool) -> String 
 pub use error::Error;
 pub use function::{BasicBlock, BlockLabel, Function, FunctionBody};
 pub use module::{IrGenerator, Module, Registry};
-//
 // `#[allow(unused_imports)]` because the only in-tree consumer of this
 // re-export (the `experimental::ReturnInferPass` implementation) is gated
 // on the `return-type-inference` feature.
@@ -80,9 +79,9 @@ pub use value::{GlobalDef, Local, LocalId, Operand};
 #[cfg(feature = "return-type-inference")]
 pub(crate) use crate::experimental::ReturnInferPass;
 
-// Crate-internal helper surfaced for the `experimental` layer, which
-// lives outside `mod gen` and therefore cannot reach into private
-// submodules directly.  Not part of the public `ir` API.
+/// Crate-internal helper surfaced for the `experimental` layer, which
+/// lives outside `mod gen` and therefore cannot reach into private
+/// submodules directly.  Not part of the public `ir` API.
 #[cfg(feature = "return-type-inference")]
 pub(crate) use gen::conversions::compose_var_def_dtype;
 
