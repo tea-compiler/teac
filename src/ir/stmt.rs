@@ -228,10 +228,11 @@ impl Stmt {
     }
 }
 
-/// Emits the bare instruction text — never a leading `\t`.
+/// Emits the bare instruction text — no leading indentation, no
+/// trailing newline.
 ///
 /// Indentation inside a function body is the printer's concern
-/// ([`super::printer::IrPrinter`]), so that the model types carry no
+/// ([`super::printer::IrPrinter`]), so the model types carry no
 /// presentation policy and other consumers (diagnostics, debugging) get
 /// unadorned text.
 impl Display for Stmt {
@@ -243,11 +244,10 @@ impl Display for Stmt {
             StmtInner::Call(s) => write!(f, "{s}"),
             StmtInner::Cmp(s) => write!(f, "{s}"),
             // `GepStmt` has no `Display`: its rendering is fallible
-            // ([`GepStmt::render`]), and the printer consumes that
+            // (`GepStmt::render`), and the printer consumes that
             // fallibility through its `Result`-returning emit path.
-            // This arm only serves hypothetical direct `Display`
-            // consumers and preserves their historical behaviour:
-            // text for well-typed GEPs, `fmt::Error` for ill-typed ones.
+            // This arm keeps direct `Display` calls working: text for
+            // well-typed GEPs, `fmt::Error` for ill-typed ones.
             StmtInner::Gep(s) => match s.render() {
                 Ok(text) => write!(f, "{text}"),
                 Err(_) => Err(fmt::Error),
@@ -495,9 +495,10 @@ impl GepStmt {
                 "{new_ptr} = getelementptr {dtype}, ptr {base_ptr}, i32 0, i32 {index}",
             )),
             // Ill-formed IR that the front end never produces; surfaced as
-            // an I/O error because that is exactly how the previous
-            // `fmt::Error`-based failure reached the caller (via
-            // `writeln!`'s `io::Write`).
+            // an I/O error so the failure shares the printer's
+            // `io::Write`-based error channel — `writeln!` failures reach
+            // the caller as `std::io::Error` wrapped in `Error::Io`,
+            // exactly like this one.
             other => Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("getelementptr on non-indexable base of type '{other}'"),

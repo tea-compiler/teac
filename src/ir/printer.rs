@@ -23,8 +23,8 @@ use std::io::Write;
 
 /// LLVM-style target triple baked into every IR dump.  Kept alongside
 /// the printer rather than on `IrGenerator` because the printer is the
-/// component that actually writes it, and `Optimizer::output` now needs
-/// the same constant — making it a free constant in `ir::printer`
+/// component that writes it; both `IrGenerator::output` and
+/// `Optimizer::output` consume it, so a free constant in `ir::printer`
 /// avoids introducing an `ir::gen`-to-`opt` dependency.
 pub const TARGET_TRIPLE: &str = "aarch64-unknown-linux-gnu";
 
@@ -166,10 +166,10 @@ impl<W: Write> IrPrinter<W> {
 
     /// Emit a single instruction line inside a function body, owning the
     /// leading `\t` indent that [`Stmt`]'s `Display` deliberately leaves
-    /// to the printer.  Block labels are not statements (`BasicBlock`
-    /// carries its label separately and [`emit_function_def`] prints it
-    /// unindented above), so every statement through this path is an
-    /// indented instruction.
+    /// to the printer.  Label statements never reach this path: the flat
+    /// IR is split into `BasicBlock`s that each carry their label, and
+    /// [`emit_function_def`] prints a label unindented above its block,
+    /// so every statement here is an indented instruction.
     ///
     /// GEPs take a special route because their rendering is fallible —
     /// [`GepStmt::render`] resolves the base operand's layout and reports
