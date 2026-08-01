@@ -110,7 +110,19 @@ impl<'a> ParseContext<'a> {
     fn parse(&self) -> ParseResult<Box<ast::Program>> {
         // Run the pest parser; convert any pest::Error into Error::Syntax.
         let pairs = <TeaLangParser as PestParser<Rule>>::parse(Rule::program, self.input)
-            .map_err(|e| Error::Syntax(e.to_string()))?;
+            .map_err(|e| {
+                // Pest reports either a single position or a span start/end;
+                // use the start position for the structured fields.
+                let (line, column) = match e.line_col {
+                    pest::error::LineColLocation::Pos(pos) => pos,
+                    pest::error::LineColLocation::Span(start, _) => start,
+                };
+                Error::Syntax {
+                    line,
+                    column,
+                    message: e.to_string(),
+                }
+            })?;
 
         let mut use_stmts = Vec::new();
         let mut elements = Vec::new();

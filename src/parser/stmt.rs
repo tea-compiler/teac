@@ -1,3 +1,11 @@
+//! Parsing of TeaLang statement rules.
+//!
+//! This submodule implements the [`ParseContext`](super::ParseContext) methods
+//! that lower statement-oriented parse-tree nodes into the corresponding AST
+//! types: code blocks, assignments, call statements, `if`/`else`
+//! conditionals, `while` loops, and `return`/`continue`/`break`/null
+//! statements.
+
 use crate::ast;
 
 use super::ParseContext;

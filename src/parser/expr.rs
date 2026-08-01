@@ -1,3 +1,12 @@
+//! Parsing of TeaLang expression rules.
+//!
+//! This submodule implements the [`ParseContext`](super::ParseContext) methods
+//! that lower expression-oriented parse-tree nodes into the corresponding AST
+//! types: right-hand values, Boolean expressions (`||`, `&&`, `!`, and
+//! comparisons), arithmetic expressions (the `+`/`-` and `*`/`/` precedence
+//! layers), and expression units (literals, parenthesised expressions,
+//! function calls, references, and left-value access chains).
+
 use crate::ast;
 
 use super::common::{get_pos, grammar_error, parse_num, Pair, ParseResult, Rule};
@@ -74,7 +83,12 @@ impl<'a> ParseContext<'a> {
         while i < inner_pairs.len() {
             if inner_pairs[i].as_rule() == Rule::op_or {
                 // Consume the operator and the next operand together.
-                let right = self.parse_bool_and_term(inner_pairs[i + 1].clone())?;
+                let right = self.parse_bool_and_term(
+                    inner_pairs
+                        .get(i + 1)
+                        .ok_or_else(|| grammar_error("bool_expr.operand", &pair_for_error))?
+                        .clone(),
+                )?;
                 expr = Box::new(ast::BoolExpr {
                     pos: expr.pos,
                     inner: ast::BoolExprInner::BoolBiOpExpr(Box::new(ast::BoolBiOpExpr {
@@ -119,7 +133,12 @@ impl<'a> ParseContext<'a> {
         let mut i = 1;
         while i < inner_pairs.len() {
             if inner_pairs[i].as_rule() == Rule::op_and {
-                let right_unit = self.parse_bool_unit_atom(inner_pairs[i + 1].clone())?;
+                let right_unit = self.parse_bool_unit_atom(
+                    inner_pairs
+                        .get(i + 1)
+                        .ok_or_else(|| grammar_error("bool_and_term.operand", &pair_for_error))?
+                        .clone(),
+                )?;
                 let right_expr = Box::new(ast::BoolExpr {
                     pos: right_unit.pos,
                     inner: ast::BoolExprInner::BoolUnit(right_unit),
@@ -333,7 +352,12 @@ impl<'a> ParseContext<'a> {
         while i < inner_pairs.len() {
             if inner_pairs[i].as_rule() == Rule::arith_add_op {
                 let op = self.parse_arith_add_op(inner_pairs[i].clone())?;
-                let right = self.parse_arith_term(inner_pairs[i + 1].clone())?;
+                let right = self.parse_arith_term(
+                    inner_pairs
+                        .get(i + 1)
+                        .ok_or_else(|| grammar_error("arith_expr.operand", &pair_for_error))?
+                        .clone(),
+                )?;
 
                 expr = Box::new(ast::ArithExpr {
                     pos: expr.pos,
@@ -380,7 +404,12 @@ impl<'a> ParseContext<'a> {
         while i < inner_pairs.len() {
             if inner_pairs[i].as_rule() == Rule::arith_mul_op {
                 let op = self.parse_arith_mul_op(inner_pairs[i].clone())?;
-                let right_unit = self.parse_expr_unit(inner_pairs[i + 1].clone())?;
+                let right_unit = self.parse_expr_unit(
+                    inner_pairs
+                        .get(i + 1)
+                        .ok_or_else(|| grammar_error("arith_term.operand", &pair_for_error))?
+                        .clone(),
+                )?;
                 let right = Box::new(ast::ArithExpr {
                     pos: right_unit.pos,
                     inner: ast::ArithExprInner::ExprUnit(right_unit),

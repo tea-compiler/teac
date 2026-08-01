@@ -1,3 +1,11 @@
+//! Parsing of TeaLang declaration and definition rules.
+//!
+//! This submodule implements the [`ParseContext`](super::ParseContext) methods
+//! that lower declaration-oriented parse-tree nodes into the corresponding AST
+//! types: `use` statements, program elements, struct definitions, typed
+//! variable declarations and definitions (including array initialisers), and
+//! function declarations and definitions.
+
 use crate::ast;
 
 use super::common::{get_pos, grammar_error, parse_num, Pair, ParseResult, Rule};
@@ -163,11 +171,14 @@ impl<'a> ParseContext<'a> {
     ///
     /// Recognises reference types (`&T`), the built-in `i32` keyword, and
     /// user-defined composite (struct) types by their identifier.  Returns
-    /// `Ok(None)` when the node is empty or contains no recognised type rule.
+    /// `Ok(None)` when the node is empty or contains no recognised type rule,
+    /// and [`Error::Grammar`] if a reference type is missing or has an empty
+    /// inner type specifier.
     ///
     /// # Arguments
     /// * `pair` – the `type_spec` parse-tree node.
     pub(crate) fn parse_type_spec(&self, pair: Pair) -> ParseResult<Option<ast::TypeSpecifier>> {
+        let pair_for_error = pair.clone();
         // Record the start position for use in the returned AST node.
         let pos = get_pos(&pair);
 
@@ -181,10 +192,10 @@ impl<'a> ParseContext<'a> {
                     let inner_type_spec = ref_children
                         .iter()
                         .find(|c| c.as_rule() == Rule::type_spec)
-                        .expect("Ref type_spec must have inner type_spec");
+                        .ok_or_else(|| grammar_error("ref_type.type_spec", &pair_for_error))?;
                     let inner_ts = self
                         .parse_type_spec(inner_type_spec.clone())?
-                        .expect("Ref inner type_spec must not be empty");
+                        .ok_or_else(|| grammar_error("ref_type.empty", &pair_for_error))?;
                     return Ok(Some(ast::TypeSpecifier {
                         pos,
                         inner: ast::TypeSpecifierInner::Reference(Box::new(inner_ts)),
@@ -255,7 +266,11 @@ impl<'a> ParseContext<'a> {
         let inner_pairs: Vec<_> = pair.into_inner().collect();
 
         // The first child is always the variable name identifier.
-        let identifier = inner_pairs[0].as_str().to_string();
+        let identifier = inner_pairs
+            .first()
+            .ok_or_else(|| grammar_error("var_def.identifier", &pair_for_error))?
+            .as_str()
+            .to_string();
 
         // Determine the form of the definition by looking for key child rules.
         let has_initializer = inner_pairs
