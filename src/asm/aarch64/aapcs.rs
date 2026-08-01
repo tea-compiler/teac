@@ -41,8 +41,8 @@ pub const OUTGOING_ARG_SLOT_BYTES: i64 = 8;
 /// AAPCS64 location of a single argument at the call boundary.
 ///
 /// `Gpr(n)` / `Fpr(n)` carry the architectural register index; pair
-/// the index with the operand's [`super::types::RegSize`] to obtain
-/// the concrete `w_`/`x_`/`s_` form.
+/// the index with the operand's [`super::types::RegisterSize`] to
+/// obtain the concrete `w_`/`x_`/`s_` form.
 ///
 /// `Stack { offset }` is the byte offset within the outgoing-arg
 /// area.  The two sides interpret the offset against different bases:
@@ -91,10 +91,9 @@ where
 /// advances.  Kept internal to this module; callers consume the
 /// resolved [`ArgumentLocation`] instead.
 ///
-/// `Float` is currently unreachable because `Dtype::F32` is not yet a
-/// variant of [`ir::Dtype`]; the arm is part of the classifier's
-/// AAPCS64 specification and becomes live as soon as the
-/// `TryFrom<&ir::Dtype>` impl learns to map `Dtype::F32` to it.
+/// `Float` is unreachable while [`ir::Dtype`] lacks an `F32` variant;
+/// the arm is kept as part of the classifier's AAPCS64 specification
+/// so adding the variant only extends the `TryFrom<&ir::Dtype>` impl.
 enum ArgumentClass {
     Int,
     #[allow(dead_code)]

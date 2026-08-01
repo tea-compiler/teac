@@ -1,3 +1,7 @@
+//! AArch64 backend driver: lowers an IR module to instructions over
+//! virtual registers, register-allocates each function, and delegates
+//! textual emission of the final assembly to [`printer::AsmPrinter`].
+
 mod aapcs;
 mod frame;
 mod function_generator;
@@ -7,20 +11,18 @@ mod printer;
 mod register_allocator;
 mod types;
 
-pub use inst::Instruction;
-pub use types::{BinOp, Operand, Register};
-
 use crate::asm::common::StructLayouts;
 use crate::asm::error::Error;
 use crate::common::{Generator, Target};
 use crate::ir;
 use aapcs::{classify_args, ArgumentLocation};
 use frame::FrameLayout;
-use function_generator::FunctionGenerator;
-use printer::{AsmPrint, AsmPrinter};
+use function_generator::AsmFunctionGenerator;
+use inst::Instruction;
+use printer::AsmPrinter;
 use register_allocator::RegisterAllocator;
 use std::io::Write;
-use types::RegisterSize;
+use types::{InstOperand, Register, RegisterSize};
 
 struct GeneratedGlobal {
     symbol: String,
@@ -70,6 +72,9 @@ fn stream_uses_fp(insts: &[Instruction]) -> bool {
     })
 }
 
+/// AArch64 assembly generator: runs instruction selection and register
+/// allocation for every function of the module, together with data
+/// layout for globals; the `Generator` impl drives both phases.
 pub struct AArch64AsmGenerator<'a> {
     module: &'a ir::Module,
     registry: &'a ir::Registry,
@@ -121,42 +126,11 @@ impl<'a> Generator for AArch64AsmGenerator<'a> {
         Ok(())
     }
 
+    /// Delegates to [`AsmPrinter::emit_program`], mirroring how the ir
+    /// layer's `output` delegates to `IrPrinter::emit_module` — the
+    /// printer owns section layout, symbol emission, and prologues.
     fn output<W: Write>(&self, w: &mut W) -> Result<(), Error> {
-        let mut printer = AsmPrinter::new(w, self.target);
-
-        if !self.globals.is_empty() {
-            printer.emit_section("data")?;
-            for g in &self.globals {
-                printer.emit_global(&g.symbol)?;
-                printer.emit_align(2)?;
-                printer.emit_label(&g.symbol)?;
-                match &g.data {
-                    GlobalData::Word { value } => printer.emit_word(*value)?,
-                    GlobalData::Array { words, zero_bytes } => {
-                        for v in words {
-                            printer.emit_word(*v)?;
-                        }
-                        if *zero_bytes > 0 {
-                            printer.emit_zero(*zero_bytes)?;
-                        }
-                    }
-                }
-            }
-            printer.emit_newline()?;
-        }
-
-        printer.emit_section("text")?;
-        for func in &self.functions {
-            printer.emit_global(&func.symbol)?;
-            printer.emit_align(2)?;
-            printer.emit_label(&func.symbol)?;
-            printer.set_uses_fp(func.uses_fp);
-            printer.emit_prologue(func.frame_size)?;
-            printer.emit_insts(&func.insts)?;
-            printer.emit_newline()?;
-        }
-
-        Ok(())
+        AsmPrinter::new(w, self.target).emit_program(&self.globals, &self.functions)
     }
 }
 
@@ -179,7 +153,7 @@ impl<'a> AArch64AsmGenerator<'a> {
                 ArgumentLocation::Gpr(n) => Instruction::Mov {
                     size,
                     dst,
-                    src: Operand::Register(Register::Physical(n)),
+                    src: InstOperand::Register(Register::Physical(n)),
                 },
                 ArgumentLocation::Fpr(_) => todo!(
                     "asmt-4: lift an incoming f32 argument out of its `s_` register \
@@ -253,7 +227,7 @@ impl<'a> AArch64AsmGenerator<'a> {
         let mut frame = FrameLayout::from_blocks(&body.blocks, layouts)?;
         let mut insts = Self::handle_arguments(body)?;
         insts.extend(
-            FunctionGenerator::new(&symbol, &frame, layouts, target, body.next_vreg)
+            AsmFunctionGenerator::new(&symbol, &frame, layouts, target, body.next_vreg)
                 .generate(&body.blocks)?,
         );
 

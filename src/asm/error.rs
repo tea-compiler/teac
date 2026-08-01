@@ -1,3 +1,7 @@
+//! Error type for the assembly backend: unsupported IR constructs,
+//! missing layout or condition information, and internal invariant
+//! violations raised during lowering or register allocation.
+
 use thiserror::Error;
 
 use crate::ir;

@@ -1,10 +1,18 @@
+//! Core type definitions for the AArch64 backend: the AAPCS64
+//! register-role constants, registers, operands, addressing modes,
+//! conditions, and the dtype-to-register-width mapping.
+//!
+//! The names are instruction-local (`InstOperand`, `InstBinOp`) so they
+//! cannot be confused with the front-end's `ir::Operand` or
+//! `ir::stmt::ArithBinOp`.
+
 use crate::asm::error::Error;
 use crate::ir;
 
 // AAPCS64 register identifiers used throughout the aarch64 backend.
 // The numeric values are the ARM architectural register indices and feed
 // directly into `Register::Physical(_)`.  Bank (`x`/`w`/`s`) is implicit
-// in the `RegSize` that accompanies the operand.
+// in the `RegisterSize` that accompanies the operand.
 
 /// First integer argument register and integer return register (`x0`).
 pub const REG_X0: u8 = 0;
@@ -17,12 +25,11 @@ pub const NUM_INT_ARG_REGS: u8 = 8;
 /// First floating-point argument register and FP return register
 /// (`s0` / `d0` / `v0`).  The FP register file is architecturally
 /// independent of the GPR file: pairing `Register::Physical(REG_S0)`
-/// with `RegSize::S32` denotes `s0`, while pairing the same physical
-/// index with `RegSize::W32` / `RegSize::X64` denotes `w0` / `x0`
+/// with `RegisterSize::S32` denotes `s0`, while pairing the same physical
+/// index with `RegisterSize::W32` / `RegisterSize::X64` denotes `w0` / `x0`
 /// (i.e. [`REG_X0`]).
 ///
-/// Referenced by the AAPCS64 FP argument / return shim that asmt-4
-/// asks you to implement; see asmt-4.md §3.3.
+/// Consumed by the AAPCS64 FP argument / return shim (asmt-4.md §3.3).
 #[allow(dead_code)]
 pub const REG_S0: u8 = 0;
 
@@ -66,8 +73,8 @@ pub enum Register {
 /// instruction can simultaneously source one operand from each bank.
 /// The register allocator uses this class to split vregs into two
 /// interference graphs that are coloured against disjoint pools.  The
-/// enum is consumed only by asmt-4's solution; at the asmt-4 skeleton
-/// stage no code constructs the variants.
+/// skeleton's integer-only colouring constructs no variants, hence the
+/// dead-code allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum RegisterClass {
@@ -92,7 +99,8 @@ pub enum RegisterSize {
 impl RegisterSize {
     /// The register class implied by this width.  `W32`/`X64` live in
     /// the general-purpose bank; `S32` is a floating-point register.
-    /// Used by asmt-4's register allocator to bucket vregs.
+    /// Consumed by the register allocator's class bucketing
+    /// (asmt-4.md §3.4).
     #[allow(dead_code)]
     pub fn class(&self) -> RegisterClass {
         match self {
@@ -124,7 +132,7 @@ impl TryFrom<&ir::Dtype> for RegisterSize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOp {
+pub enum InstBinOp {
     Add,
     Sub,
     Mul,
@@ -132,10 +140,9 @@ pub enum BinOp {
 }
 
 /// Single-precision floating-point binary operators corresponding 1:1
-/// to the aarch64 `fadd`/`fsub`/`fmul`/`fdiv` instructions.  The
-/// variants are unused at the asmt-4 skeleton stage; asmt-4's solution
-/// produces them from the IR's `FBiOpStmt`.  The `F` prefix mirrors the
-/// aarch64 mnemonic family and is preserved deliberately.
+/// to the aarch64 `fadd`/`fsub`/`fmul`/`fdiv` instructions.  Unused by
+/// the skeleton; asmt-4's solution produces them from the IR's
+/// `FBiOpStmt`.  The `F` prefix mirrors the aarch64 mnemonic family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum FBinOp {
@@ -155,8 +162,10 @@ pub enum Cond {
     Ge,
 }
 
+/// One operand of an integer instruction: a register or a 64-bit
+/// immediate.  Also serves as a `Gep` index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operand {
+pub enum InstOperand {
     Register(Register),
     Immediate(i64),
 }
@@ -165,10 +174,4 @@ pub enum Operand {
 pub enum Addr {
     BaseOff { base: Register, offset: i64 },
     Global(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexOperand {
-    Reg(Register),
-    Imm(i64),
 }

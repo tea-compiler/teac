@@ -1,8 +1,13 @@
+//! Register allocation by graph coloring: builds liveness and
+//! interference over virtual registers, spills what cannot be colored,
+//! and rewrites the instruction stream with physical registers plus
+//! spill loads/stores around the frame.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::frame::FrameLayout;
 use super::inst::Instruction;
-use super::types::{Addr, IndexOperand, Operand, RegisterSize, Register, SCRATCH0, SCRATCH1};
+use super::types::{Addr, InstBinOp, InstOperand, RegisterSize, Register, SCRATCH0, SCRATCH1};
 use crate::asm::common::StackSlot;
 use crate::asm::error::Error;
 use crate::common::bitset::Bitset;
@@ -70,8 +75,8 @@ impl RegisterAllocation {
 /// reserves spill slots in the borrowed [`FrameLayout`] for the vregs
 /// that do not fit, and rewrites the stream into physical-register form.
 /// Allocation and rewriting form one phase with no externally observable
-/// intermediate, mirroring the other backend stages (`FunctionGenerator`,
-/// `AsmPrinter`, `InstRewriter`).
+/// intermediate, mirroring the other backend stages
+/// (`AsmFunctionGenerator`, `AsmPrinter`, `InstRewriter`).
 pub struct RegisterAllocator<'a> {
     insts: &'a [Instruction],
     frame: &'a mut FrameLayout,
@@ -422,13 +427,13 @@ impl<'a> InstRewriter<'a> {
 
     fn load_src_operand(
         &mut self,
-        op: Operand,
+        op: InstOperand,
         size: RegisterSize,
         scratch: u8,
-    ) -> Result<Operand, Error> {
+    ) -> Result<InstOperand, Error> {
         match op {
-            Operand::Immediate(i) => Ok(Operand::Immediate(i)),
-            Operand::Register(r) => Ok(Operand::Register(self.load_src_reg(r, size, scratch)?)),
+            InstOperand::Immediate(i) => Ok(InstOperand::Immediate(i)),
+            InstOperand::Register(r) => Ok(InstOperand::Register(self.load_src_reg(r, size, scratch)?)),
         }
     }
 
@@ -466,7 +471,6 @@ impl<'a> InstRewriter<'a> {
                 index,
                 scale,
             } => self.rewrite_gep(*dst, *base, *index, *scale)?,
-            // Pass-through instructions.
             Instruction::B { label } => self.output.push(Instruction::B {
                 label: label.clone(),
             }),
@@ -484,7 +488,7 @@ impl<'a> InstRewriter<'a> {
         Ok(())
     }
 
-    fn rewrite_mov(&mut self, size: RegisterSize, dst: Register, src: Operand) -> Result<(), Error> {
+    fn rewrite_mov(&mut self, size: RegisterSize, dst: Register, src: InstOperand) -> Result<(), Error> {
         let src_op = self.load_src_operand(src, size, SCRATCH1)?;
 
         match self.map_reg(dst)? {
@@ -505,11 +509,11 @@ impl<'a> InstRewriter<'a> {
 
     fn rewrite_binop(
         &mut self,
-        op: crate::asm::aarch64::BinOp,
+        op: InstBinOp,
         size: RegisterSize,
         dst: Register,
         lhs: Register,
-        rhs: Operand,
+        rhs: InstOperand,
     ) -> Result<(), Error> {
         let lhs_reg = self.load_src_reg(lhs, size, SCRATCH0)?;
         let rhs_op = self.load_src_operand(rhs, size, SCRATCH1)?;
@@ -523,7 +527,7 @@ impl<'a> InstRewriter<'a> {
         })
     }
 
-    fn rewrite_cmp(&mut self, size: RegisterSize, lhs: Register, rhs: Operand) -> Result<(), Error> {
+    fn rewrite_cmp(&mut self, size: RegisterSize, lhs: Register, rhs: InstOperand) -> Result<(), Error> {
         let lhs_reg = self.load_src_reg(lhs, size, SCRATCH0)?;
         let rhs_op = self.load_src_operand(rhs, size, SCRATCH1)?;
 
@@ -573,16 +577,16 @@ impl<'a> InstRewriter<'a> {
         &mut self,
         dst: Register,
         base: Register,
-        index: IndexOperand,
+        index: InstOperand,
         scale: i64,
     ) -> Result<(), Error> {
         let base_reg = self.load_src_reg(base, RegisterSize::X64, SCRATCH0)?;
         let base_used_scratch = matches!(base_reg, Register::Physical(r) if r == SCRATCH0);
         let index_scratch = scratch_after_base(base_used_scratch);
         let index_rewritten = match index {
-            IndexOperand::Imm(i) => IndexOperand::Imm(i),
-            IndexOperand::Reg(r) => {
-                IndexOperand::Reg(self.load_src_reg(r, RegisterSize::W32, index_scratch)?)
+            InstOperand::Immediate(i) => InstOperand::Immediate(i),
+            InstOperand::Register(r) => {
+                InstOperand::Register(self.load_src_reg(r, RegisterSize::W32, index_scratch)?)
             }
         };
         let dst_scratch = scratch_after_base(base_used_scratch);
@@ -653,24 +657,24 @@ impl<'a> InstRewriter<'a> {
 
     fn operand_to_phys_reg(
         &mut self,
-        op: Operand,
+        op: InstOperand,
         size: RegisterSize,
         scratch: u8,
     ) -> Result<u8, Error> {
         match op {
-            Operand::Immediate(imm) => {
+            InstOperand::Immediate(imm) => {
                 self.output.push(Instruction::Mov {
                     size,
                     dst: Register::Physical(scratch),
-                    src: Operand::Immediate(imm),
+                    src: InstOperand::Immediate(imm),
                 });
                 Ok(scratch)
             }
-            Operand::Register(Register::Physical(n)) => Ok(n),
-            Operand::Register(Register::StackPointer) => {
+            InstOperand::Register(Register::Physical(n)) => Ok(n),
+            InstOperand::Register(Register::StackPointer) => {
                 Err(Error::Internal("cannot use SP as source".into()))
             }
-            Operand::Register(Register::Virtual(_)) => {
+            InstOperand::Register(Register::Virtual(_)) => {
                 Err(Error::Internal("unexpected vreg in operand".into()))
             }
         }
