@@ -1,3 +1,10 @@
+//! Compile-time (static) evaluation of constant expressions.
+//!
+//! This module folds AST expressions composed entirely of literals and
+//! constant operators into concrete `i32` values during IR generation.
+//! Failures that would otherwise only appear at runtime — division by zero
+//! and integer overflow — are reported here as compile-time errors.
+
 use crate::ast;
 use crate::ir::module::IrGenerator;
 use crate::ir::Error;

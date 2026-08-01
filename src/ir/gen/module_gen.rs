@@ -10,6 +10,7 @@
 use crate::ast;
 use crate::ir::compute_link_name;
 use crate::ir::function::{BasicBlock, BlockLabel, Function, FunctionBody, FunctionGenerator};
+use crate::ir::gen::conversions::compose_var_decl_dtype;
 use crate::ir::gen::type_infer;
 use crate::ir::module::IrGenerator;
 use crate::ir::printer::IrPrinter;
@@ -534,10 +535,7 @@ impl IrGenerator<'_> {
                 decl.identifier.clone(),
                 StructMember {
                     index,
-                    dtype: match &decl.inner {
-                        ast::VarDeclInner::Scalar => base_dtype,
-                        ast::VarDeclInner::Array(array) => Dtype::array_of(base_dtype, array.len),
-                    },
+                    dtype: compose_var_decl_dtype(base_dtype, &decl.inner),
                 },
             ));
         }

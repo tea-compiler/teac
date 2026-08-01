@@ -1,3 +1,10 @@
+//! Core type definitions for the IR.
+//!
+//! This module defines [`Dtype`], the IR-level data type threaded through
+//! lowering, printing, and the back-end, together with the aggregate and
+//! signature descriptors ([`StructType`], [`StructMember`], [`FunctionType`])
+//! stored in the module's type registry.
+
 use crate::ast;
 use std::fmt::{self, Display, Formatter};
 

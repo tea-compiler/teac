@@ -17,14 +17,13 @@ use crate::ir::Error;
 /// Builds an i32-typed [`Operand`] for a GEP index.
 ///
 /// Array/struct indices are `usize` in the AST and source-language domain
-/// but must be lowered to `i32` to match LLVM IR's GEP index width.  The
-/// compiler panics if a single declared array or struct exceeds `i32::MAX`
-/// elements — this is a hard limit on the emitted IR, not a TeaLang rule,
-/// and in practice no program will ever approach it.
-fn array_index_operand(index: usize) -> Operand {
-    Operand::from(
-        i32::try_from(index).expect("array/struct index exceeds i32::MAX (LLVM GEP width)"),
-    )
+/// but must be lowered to `i32` to match LLVM IR's GEP index width.  A
+/// source-derived index that does not fit is rejected with
+/// [`Error::ArrayIndexTooLarge`] — this is a hard limit on the emitted IR,
+/// not a TeaLang rule, and in practice no program will ever approach it.
+fn array_index_operand(index: usize) -> Result<Operand, Error> {
+    let index = i32::try_from(index).map_err(|_| Error::ArrayIndexTooLarge { index })?;
+    Ok(Operand::from(index))
 }
 
 /// Returns the element type of the array pointed to by `base_ptr`.
@@ -267,7 +266,11 @@ impl FunctionGenerator<'_> {
             let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
             let right_elem = self.handle_right_val(val)?;
 
-            self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
+            self.emit_gep(
+                element_ptr.clone(),
+                base_ptr.clone(),
+                array_index_operand(i)?,
+            );
             self.emit_store(right_elem, element_ptr);
         }
         Ok(())
@@ -290,7 +293,11 @@ impl FunctionGenerator<'_> {
                 let fill_val = self.handle_right_val(val)?;
                 for i in 0..*count {
                     let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
-                    self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
+                    self.emit_gep(
+                        element_ptr.clone(),
+                        base_ptr.clone(),
+                        array_index_operand(i)?,
+                    );
                     self.emit_store(fill_val.clone(), element_ptr);
                 }
                 Ok(())
@@ -749,7 +756,7 @@ impl FunctionGenerator<'_> {
                 self.emit_load(idx.clone(), src);
                 Ok(idx)
             }
-            ast::IndexExprInner::Num(num) => Ok(array_index_operand(*num)),
+            ast::IndexExprInner::Num(num) => array_index_operand(*num),
         }
     }
 }

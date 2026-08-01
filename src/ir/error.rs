@@ -1,3 +1,11 @@
+//! Error type for the IR layer.
+//!
+//! This module defines [`Error`], the single error type produced by IR
+//! generation and module-level type registration.  Its variants cover name
+//! and type resolution failures, duplicate or conflicting definitions,
+//! unsupported source constructs, and compile-time evaluation failures;
+//! the driver surfaces them to the user as diagnostics.
+
 use crate::ast;
 use crate::ir::types::Dtype;
 use std::path::PathBuf;
@@ -59,6 +67,9 @@ pub enum Error {
 
     #[error("Invalid array expression")]
     InvalidArrayExpression,
+
+    #[error("Array index {index} exceeds the IR's GEP index width (i32::MAX)")]
+    ArrayIndexTooLarge { index: usize },
 
     #[error("Reference operator '&' can only be applied to array variables, not '{symbol}'")]
     InvalidReference { symbol: String },
