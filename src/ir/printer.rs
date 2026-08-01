@@ -1,6 +1,22 @@
+//! Textual printer for teac's IR (the `--emit ir` dump).
+//!
+//! [`IrPrinter`] is the single source of truth for what a teac IR file
+//! looks like: target header, struct types, globals, then every function
+//! as a definition or declaration.  All presentation policy lives here
+//! rather than on the model types: the printer owns the leading `\t` that
+//! indents instructions inside a function body (statement `Display`
+//! impls in [`super::stmt`] deliberately emit bare text), and it consumes
+//! the fallible [`GepStmt::render`] directly so that a GEP with an
+//! ill-typed base surfaces as a proper [`Error`] through the
+//! `Result`-returning emit path instead of as an opaque `fmt::Error`
+//! buried inside a `writeln!`.
+//!
+//! [`GepStmt::render`]: super::stmt::GepStmt::render
+
 use super::error::Error;
 use super::function::FunctionBody;
 use super::module::{Module, Registry};
+use super::stmt::{Stmt, StmtInner};
 use super::types::{Dtype, FunctionType, StructType};
 use super::value::GlobalDef;
 use std::io::Write;
@@ -140,11 +156,33 @@ impl<W: Write> IrPrinter<W> {
         for block in &body.blocks {
             writeln!(self.writer, "{}:", block.label)?;
             for stmt in &block.stmts {
-                writeln!(self.writer, "{stmt}")?;
+                self.emit_stmt(stmt)?;
             }
         }
         writeln!(self.writer, "}}")?;
         writeln!(self.writer)?;
+        Ok(())
+    }
+
+    /// Emit a single instruction line inside a function body, owning the
+    /// leading `\t` indent that [`Stmt`]'s `Display` deliberately leaves
+    /// to the printer.  Block labels are not statements (`BasicBlock`
+    /// carries its label separately and [`emit_function_def`] prints it
+    /// unindented above), so every statement through this path is an
+    /// indented instruction.
+    ///
+    /// GEPs take a special route because their rendering is fallible —
+    /// [`GepStmt::render`] resolves the base operand's layout and reports
+    /// ill-typed bases as an [`Error`]; every other instruction renders
+    /// through its infallible `Display`.
+    ///
+    /// [`emit_function_def`]: Self::emit_function_def
+    /// [`GepStmt::render`]: super::stmt::GepStmt::render
+    fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Error> {
+        match &stmt.inner {
+            StmtInner::Gep(gep) => writeln!(self.writer, "\t{}", gep.render()?)?,
+            _ => writeln!(self.writer, "\t{stmt}")?,
+        }
         Ok(())
     }
 

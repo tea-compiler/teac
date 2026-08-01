@@ -1,5 +1,20 @@
+//! IR statement (instruction) definitions for teac's LLVM-like IR.
+//!
+//! Each instruction is a small struct (`GepStmt`, `CallStmt`, …) wrapped
+//! into a [`Stmt`] by the [`StmtInner`] enum.  Instructions implement
+//! [`Display`] as *bare* instruction text — no leading indentation, no
+//! trailing newline — because laying out a function body (indent column,
+//! label placement) is the printer's business, not the model's: that is
+//! owned by [`super::printer::IrPrinter`].  The one instruction that
+//! cannot be rendered infallibly is the GEP — its text depends on the
+//! base operand's layout and an ill-typed base has no rendering — so it
+//! carries no `Display` impl at all; instead the fallible logic lives in
+//! the explicit [`GepStmt::render`] helper, which the printer consumes
+//! through its `Result`-returning emit path.
+
 use crate::ast;
 
+use super::error::Error;
 use super::function::BlockLabel;
 use super::types::Dtype;
 use super::value::Operand;
@@ -213,21 +228,36 @@ impl Stmt {
     }
 }
 
+/// Emits the bare instruction text — never a leading `\t`.
+///
+/// Indentation inside a function body is the printer's concern
+/// ([`super::printer::IrPrinter`]), so that the model types carry no
+/// presentation policy and other consumers (diagnostics, debugging) get
+/// unadorned text.
 impl Display for Stmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
-            StmtInner::Alloca(s) => write!(f, "\t{s}"),
-            StmtInner::BiOp(s) => write!(f, "\t{s}"),
-            StmtInner::CJump(s) => write!(f, "\t{s}"),
-            StmtInner::Call(s) => write!(f, "\t{s}"),
-            StmtInner::Cmp(s) => write!(f, "\t{s}"),
-            StmtInner::Gep(s) => write!(f, "\t{s}"),
+            StmtInner::Alloca(s) => write!(f, "{s}"),
+            StmtInner::BiOp(s) => write!(f, "{s}"),
+            StmtInner::CJump(s) => write!(f, "{s}"),
+            StmtInner::Call(s) => write!(f, "{s}"),
+            StmtInner::Cmp(s) => write!(f, "{s}"),
+            // `GepStmt` has no `Display`: its rendering is fallible
+            // ([`GepStmt::render`]), and the printer consumes that
+            // fallibility through its `Result`-returning emit path.
+            // This arm only serves hypothetical direct `Display`
+            // consumers and preserves their historical behaviour:
+            // text for well-typed GEPs, `fmt::Error` for ill-typed ones.
+            StmtInner::Gep(s) => match s.render() {
+                Ok(text) => write!(f, "{text}"),
+                Err(_) => Err(fmt::Error),
+            },
             StmtInner::Label(s) => write!(f, "{s}"),
-            StmtInner::Load(s) => write!(f, "\t{s}"),
-            StmtInner::Phi(s) => write!(f, "\t{s}"),
-            StmtInner::Return(s) => write!(f, "\t{s}"),
-            StmtInner::Store(s) => write!(f, "\t{s}"),
-            StmtInner::Jump(s) => write!(f, "\t{s}"),
+            StmtInner::Load(s) => write!(f, "{s}"),
+            StmtInner::Phi(s) => write!(f, "{s}"),
+            StmtInner::Return(s) => write!(f, "{s}"),
+            StmtInner::Store(s) => write!(f, "{s}"),
+            StmtInner::Jump(s) => write!(f, "{s}"),
         }
     }
 }
@@ -420,8 +450,24 @@ impl Display for LabelStmt {
     }
 }
 
-impl Display for GepStmt {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl GepStmt {
+    /// Renders this GEP as teac IR text, choosing the `getelementptr`
+    /// form from the base operand's layout:
+    ///
+    /// - pointer to a fixed-size array or struct → two-index form
+    ///   (`i32 0, i32 <index>`), i.e. aggregate/field addressing;
+    /// - pointer to an unsized array (a decayed `&[T]` argument) →
+    ///   element-typed single-index form;
+    /// - pointer to a scalar → single-index form;
+    /// - first-class array operand (e.g. a global array) → two-index form.
+    ///
+    /// The lookup is fallible: a base that is neither a pointer nor an
+    /// array is ill-formed IR with no valid rendering.  Keeping that
+    /// fallibility in an explicit helper — rather than inside a `Display`
+    /// impl where it could only surface as an opaque `fmt::Error` — lets
+    /// the printer report it through its own `Result`-returning emit path.
+    /// This is why [`GepStmt`] deliberately has no `Display` impl.
+    pub fn render(&self) -> Result<String, Error> {
         let Self {
             new_ptr,
             base_ptr,
@@ -432,27 +478,30 @@ impl Display for GepStmt {
                 Dtype::Array {
                     length: Some(_), ..
                 }
-                | Dtype::Struct { .. } => write!(
-                    f,
+                | Dtype::Struct { .. } => Ok(format!(
                     "{new_ptr} = getelementptr {pointee}, ptr {base_ptr}, i32 0, i32 {index}",
-                ),
+                )),
                 Dtype::Array {
                     element,
                     length: None,
-                } => write!(
-                    f,
+                } => Ok(format!(
                     "{new_ptr} = getelementptr {element}, ptr {base_ptr}, i32 {index}",
-                ),
-                _ => write!(
-                    f,
+                )),
+                _ => Ok(format!(
                     "{new_ptr} = getelementptr {pointee}, ptr {base_ptr}, i32 {index}",
-                ),
+                )),
             },
-            dtype @ Dtype::Array { .. } => write!(
-                f,
+            dtype @ Dtype::Array { .. } => Ok(format!(
                 "{new_ptr} = getelementptr {dtype}, ptr {base_ptr}, i32 0, i32 {index}",
-            ),
-            _ => Err(fmt::Error),
+            )),
+            // Ill-formed IR that the front end never produces; surfaced as
+            // an I/O error because that is exactly how the previous
+            // `fmt::Error`-based failure reached the caller (via
+            // `writeln!`'s `io::Write`).
+            other => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("getelementptr on non-indexable base of type '{other}'"),
+            ))),
         }
     }
 }
