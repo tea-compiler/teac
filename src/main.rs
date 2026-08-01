@@ -2,7 +2,7 @@
 //!
 //! This binary ties together all compiler stages in order:
 //! parsing → IR generation → optimization → assembly emission.
-//! The output stage can be stopped early (via `--emit`) to inspect
+//! The pipeline can be stopped early (via `--emit`) to inspect
 //! the AST, IR, or final AArch64 assembly.
 
 mod asm;
@@ -22,8 +22,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Controls which intermediate representation the compiler writes to the output.
-/// The pipeline always runs up to (and including) the chosen stage, then exits.
+/// Selects which pipeline stage's output is written.
+/// The pipeline always runs up to (and including) that stage, then exits.
 #[derive(Copy, Clone, Debug, PartialEq, ValueEnum)]
 enum EmitTarget {
     /// Stop after parsing and emit the Abstract Syntax Tree.
@@ -43,7 +43,7 @@ struct Cli {
     #[clap(value_name = "FILE")]
     input: String,
 
-    /// Which IR stage to emit as output (default: `asm`).
+    /// Which pipeline stage to emit as output (default: `asm`).
     #[arg(long, value_enum, ignore_case = true, default_value = "asm")]
     emit: EmitTarget,
 
@@ -108,7 +108,6 @@ fn run() -> Result<()> {
         .generate()
         .with_context(|| format!("failed to parse '{}'", cli.input))?;
 
-    // Early exit: the user only wants the AST dump.
     if cli.emit == EmitTarget::Ast {
         return parser
             .output(&mut writer)
@@ -130,12 +129,10 @@ fn run() -> Result<()> {
     let mut ir_gen = ir::IrGenerator::with_default_passes(ast, source_dir);
     ir_gen.generate().context("failed to generate IR")?;
 
-    // Optimization stage: run the default function-pass pipeline over
-    // the freshly generated IR. `Optimizer::with_default_passes` takes
-    // `&mut ir_gen.module`, and the assembly generator below needs to
-    // reborrow the module immutably. Confining the optimizer to its own
-    // scope forces Rust to drop that mutable borrow before the asm stage
-    // starts.
+    // `Optimizer::with_default_passes` takes `&mut ir_gen.module`, and the
+    // assembly generator below reborrows the module immutably. Confining the
+    // optimizer to its own scope forces Rust to drop that mutable borrow
+    // before the asm stage starts.
     {
         let mut optimizer =
             opt::Optimizer::with_default_passes(&mut ir_gen.module, &ir_gen.registry);
@@ -143,7 +140,6 @@ fn run() -> Result<()> {
             .generate()
             .context("failed to run optimization passes")?;
 
-        // Early exit: the user only wants the (optimized) IR dump.
         if cli.emit == EmitTarget::Ir {
             return optimizer
                 .output(&mut writer)

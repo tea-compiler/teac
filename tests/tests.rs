@@ -18,10 +18,6 @@ use regex::Regex;
 
 static INIT: Once = Once::new();
 
-// ---------------------------------------------------------------------------
-// Platform detection
-// ---------------------------------------------------------------------------
-
 fn is_native_macos() -> bool {
     cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
@@ -93,10 +89,6 @@ fn ensure_cross_tools() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// stdlib object (tests/std/std.o) build
-// ---------------------------------------------------------------------------
 
 /// Platform-specific path for the compiled stdlib object:
 ///   - macOS AArch64                       → `tests/std/std-macos.o`
@@ -205,10 +197,6 @@ fn ensure_std() {
         );
     });
 }
-
-// ---------------------------------------------------------------------------
-// Compile / link / run primitives
-// ---------------------------------------------------------------------------
 
 /// Invokes `teac --emit asm` from `dir` to compile `input_file` into
 /// `output_file`.  `input_file` must be a bare filename so `teac`'s
@@ -370,10 +358,6 @@ fn run_with_qemu(exe: &Path, input: Option<&Path>) -> io::Result<(i32, Vec<u8>, 
     run_with_optional_stdin(&mut cmd, input)
 }
 
-// ---------------------------------------------------------------------------
-// Output comparison helpers
-// ---------------------------------------------------------------------------
-
 /// Whitespace-insensitive normalisation: collapses runs of whitespace
 /// within each line to a single space, drops blank lines, appends a
 /// trailing newline.
@@ -412,10 +396,6 @@ fn append_line<P: AsRef<Path>>(path: P, line: &str) {
     writeln!(f, "{line}").expect("Failed to append line");
 }
 
-// ---------------------------------------------------------------------------
-// Test drivers
-// ---------------------------------------------------------------------------
-
 /// Returns every function name declared in `source`, in source order.
 /// Matches any line whose first non-whitespace token is the `fn`
 /// keyword followed by an identifier and an opening parenthesis;
@@ -439,9 +419,8 @@ fn extract_fn_names(source: &str) -> Vec<String> {
 /// receives the absolute source path, so `source_dir` resolves to the
 /// test-case directory without a `current_dir` override.
 //
-// `#[allow(dead_code)]` because every in-tree caller is under a
-// not-enabled-by-default `#[cfg(feature = ...)]` for a future language
-// feature (float / for-loop / struct-method / multi-dim-array).
+// `#[allow(dead_code)]`: every in-tree caller is behind a non-default
+// `#[cfg(feature = ...)]` (float / for-loop / struct-method / multi-dim-array).
 #[allow(dead_code)]
 fn test_ast_parse(test_name: &str) {
     let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -526,7 +505,6 @@ fn test_ir(test_name: &str) {
     let build_dir = case_dir.join("build");
     fs::create_dir_all(&build_dir).expect("Failed to create build dir");
 
-    // Step 1: Generate IR
     let tool = Path::new(env!("CARGO_BIN_EXE_teac"));
     let ir_output = Command::new(tool)
         .arg(&tea)
@@ -550,7 +528,6 @@ fn test_ir(test_name: &str) {
     fs::write(&ll_path, &ir_output.stdout)
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", ll_path.display()));
 
-    // Step 2: Compile IR + std.c → executable
     let std_c = std_dir.join("std.c");
     let exe = build_dir.join(format!("{test_name}_ir"));
 
@@ -570,7 +547,6 @@ fn test_ir(test_name: &str) {
         clang_output.status.code().unwrap_or(-1)
     );
 
-    // Step 3: Run the executable
     let input = case_dir.join(format!("{test_name}.in"));
     let input_path = if input.is_file() {
         Some(input.as_path())
@@ -588,7 +564,6 @@ fn test_ir(test_name: &str) {
         }
     }
 
-    // Step 4: Compare output against golden .out file
     let expected_out = case_dir.join(format!("{test_name}.out"));
     let actual_out = build_dir.join(format!("{test_name}_ir.out"));
 
@@ -698,9 +673,6 @@ fn test_single(test_name: &str) {
         tea.display()
     );
 
-    // -----------------------------------------------------------------------
-    // Step 1: Compile TeaLang source to assembly
-    // -----------------------------------------------------------------------
     let output_name = format!("{test_name}.s");
     let output_path = out_dir.join(&output_name);
     let output = launch(
@@ -725,9 +697,6 @@ fn test_single(test_name: &str) {
         output_path.display()
     );
 
-    // -----------------------------------------------------------------------
-    // Step 2: Locate the pre-built stdlib object file
-    // -----------------------------------------------------------------------
     let stdlib = get_std_o_path();
     assert!(
         stdlib.is_file(),
@@ -745,9 +714,6 @@ fn test_single(test_name: &str) {
         None
     };
 
-    // -----------------------------------------------------------------------
-    // Step 3: Link assembly + stdlib → executable and run (platform-specific)
-    // -----------------------------------------------------------------------
     let (run_code, run_stdout, run_stderr) = if is_native_macos() {
         let exe = out_dir.join(test_name);
         let (link_code, link_err) =
@@ -799,16 +765,10 @@ fn test_single(test_name: &str) {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Step 4: Write actual output (stdout + exit code) to file
-    // -----------------------------------------------------------------------
     fs::write(&actual_out, &run_stdout)
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", actual_out.display()));
     append_line(&actual_out, &run_code.to_string());
 
-    // -----------------------------------------------------------------------
-    // Step 5: Compare actual output against the golden .out file
-    // -----------------------------------------------------------------------
     match read_to_string_if_exists(&expected_out).expect("Failed to read expected output file") {
         Some(exp) => {
             let got = fs::read_to_string(&actual_out)
@@ -832,10 +792,6 @@ fn test_single(test_name: &str) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Test declaration macros
-// ---------------------------------------------------------------------------
 
 /// Declares a batch of `test_single` tests from test-case names.
 macro_rules! full_tests {
@@ -888,10 +844,6 @@ macro_rules! asmt_tests {
     };
 }
 
-// -----------------------------------------------------------------------
-// Full compile-link-run tests
-// -----------------------------------------------------------------------
-
 full_tests! {
     dfs,
     bfs,
@@ -925,7 +877,6 @@ full_tests! {
     type_infer_basic,
 }
 
-// Return-type-inference tests (feature-gated)
 // type_infer_1..5 exercise the return-type-inference pass (every `fn`
 // omits its `-> T` clause).  Without the feature the baseline treats
 // omitted returns as `-> void`, so these tests would fail spuriously.
@@ -945,13 +896,7 @@ fn type_infer_5() {
     test_compile_error("type_infer_5");
 }
 
-// Assignment tests
-//
-// Each test runs `asmt_tests!`, which always performs AST parsing and
-// then dispatches to one deeper stage based on the `asmt-tests-*`
-// feature: `ast` stops after AST, `ir` runs `test_ir`, and `asm` (the
-// default when no `asmt-tests-*` is set) runs `test_single` end-to-end.
-// Per-assignment feature flags select which batch is compiled:
+// Run per assignment feature:
 //   cargo test --features float
 //   cargo test --features for-loop
 //   cargo test --features struct-method

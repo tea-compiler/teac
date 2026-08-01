@@ -64,9 +64,9 @@ impl Graph {
 
     /// Builds a [`Graph`] from a slice of [`CfgNode`] implementors.
     ///
-    /// This method first collects all node labels into a name-to-index map,
-    /// then calls [`CfgNode::successors`] on each node to compute the full
-    /// successor adjacency list, and finally delegates to [`Graph::new`].
+    /// All node labels are collected into a name-to-index map before any
+    /// [`CfgNode::successors`] call runs, so a node may name a branch target
+    /// that appears later in `nodes`.
     pub fn from_nodes<N: CfgNode>(nodes: &[N]) -> Self {
         let n = nodes.len();
         let label_map: HashMap<String, usize> = nodes
