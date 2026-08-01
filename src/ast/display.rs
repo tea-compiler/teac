@@ -245,7 +245,6 @@ impl Display for MemberExpr {
 /// for qualified calls.
 impl Display for FnCall {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        // Format all argument values as a comma-separated string.
         let args: Vec<String> = self.vals.iter().map(|v| format!("{}", v)).collect();
         if let Some(module) = &self.module_prefix {
             write!(f, "{}::{}({})", module, self.name, args.join(", "))
