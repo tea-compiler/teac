@@ -1,60 +1,30 @@
-//! Generic pass infrastructure shared by IR generation and optimization.
+//! Function-level pass infrastructure shared by IR generation and
+//! optimization.
 //!
-//! teac uses two tiers of passes:
+//! teac uses two tiers of passes; this module holds the layer-neutral tier:
 //!
-//! - **Module passes** ([`ModulePass`]) run once over the whole program
-//!   with `&mut IrGenerator<'_>`.  Used for cross-function analysis such
-//!   as return-type inference.
 //! - **Function passes** ([`FunctionPass`]) run on a single IR
 //!   [`Function`].  Used for optimizations; see [`crate::opt`].
+//! - **Module passes** ([`crate::ir::ModulePass`]) run once over the whole
+//!   program with `&mut IrGenerator<'_>`.  They are IR-coupled by design and
+//!   live in [`crate::ir::pass`].
 //!
-//! Each tier has a matching [`ModulePassManager`] / [`FunctionPassManager`]
-//! that runs a list of boxed trait objects in registration order.
+//! # Fallibility policy per tier
+//!
+//! Function passes are **infallible by contract**: [`FunctionPass::run`]
+//! returns `()` and a panic means a compiler bug, not a recoverable error.
+//! Module passes are **fallible**: they return `Result<(), ir::Error>` and
+//! the first error aborts the pipeline.
+//!
+//! Each tier has a matching pass manager — [`FunctionPassManager`] here and
+//! [`crate::ir::pass::ModulePassManager`] in the IR layer — that runs a list
+//! of boxed trait objects in registration order.
+//!
+//! This module remains IR-coupled through [`FunctionPass`]/[`Function`];
+//! the coupling is accepted because `common` is a crate-internal utility
+//! layer, not a public API surface.
 
-use crate::ir::module::IrGenerator;
-use crate::ir::{Error, Function};
-
-// ---------------------------------------------------------------------------
-// Module-level passes
-// ---------------------------------------------------------------------------
-
-/// A pass that runs once over the whole translation unit.
-pub trait ModulePass {
-    /// Run this pass against `gen`.  Returning `Err` aborts the pipeline
-    /// (subsequent passes and later compilation stages are skipped).
-    fn run(&self, gen: &mut IrGenerator<'_>) -> Result<(), Error>;
-}
-
-/// Sequential pipeline of [`ModulePass`] trait objects, executed in
-/// registration order.
-#[derive(Default)]
-pub struct ModulePassManager {
-    passes: Vec<Box<dyn ModulePass>>,
-}
-
-impl ModulePassManager {
-    /// Create an empty manager with no registered passes.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Append `pass` to the end of the pipeline.
-    pub fn add_pass(&mut self, pass: Box<dyn ModulePass>) {
-        self.passes.push(pass);
-    }
-
-    /// Run every pass against `gen`, stopping at the first error.
-    pub fn run(&self, gen: &mut IrGenerator<'_>) -> Result<(), Error> {
-        for pass in &self.passes {
-            pass.run(gen)?;
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Function-level passes
-// ---------------------------------------------------------------------------
+use crate::ir::Function;
 
 /// A pass that runs on a single IR [`Function`].
 ///

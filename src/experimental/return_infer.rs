@@ -1,13 +1,11 @@
-//! Pluggable return-type inference pass (asmt-2).
+//! Return-type inference pass (asmt-2): a feature-gated [`ModulePass`].
 //!
-//! This module is a **self-contained, feature-gated extension** of the
-//! compiler.  It runs between Pass 2 (signature registration) and Pass 3
+//! The pass runs between Pass 2 (signature registration) and Pass 3
 //! (per-function type inference + IR generation) and fills in the return
-//! type of every function that was declared without an explicit `-> T`
-//! clause.  The rest of the pipeline is not touched — the forward-flow
-//! `type_infer` pass (inside the otherwise-private `ir::gen` module tree)
-//! and the [`FunctionGenerator`] see only concrete [`Dtype`]s after we
-//! are done.
+//! type of every function declared without an explicit `-> T` clause.
+//! Downstream stages — the forward-flow `type_infer` pass (inside the
+//! otherwise-private `ir::gen` module tree) and the
+//! [`FunctionGenerator`] — see only concrete [`Dtype`]s.
 //!
 //! [`FunctionGenerator`]: crate::ir::function::FunctionGenerator
 //!
@@ -23,8 +21,8 @@
 //!                       Registry has every return type concrete.
 //! ```
 //!
-//! When the feature is disabled, this module is not compiled at all;
-//! omitted return types silently remain `void` (the pre-asmt-2 behaviour).
+//! When the feature is disabled, this module is not compiled at all and
+//! omitted return types remain `void`.
 //!
 //! # Algorithm
 //!
@@ -49,9 +47,8 @@
 //!    to `registry.function_types[name].return_dtype`.  Unresolved
 //!    variables and non-`void`/`i32` resolutions are errors.
 //!
-//! Steps 2 and 3 use a single shared [`UnionFind`]: constraints from one
-//! function's body can resolve the return type of another — that is the
-//! whole point of doing this globally.
+//! Steps 2 and 3 share one [`UnionFind`], so constraints from one
+//! function's body can resolve the return type of another.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -59,16 +56,12 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 
 use crate::ast;
-use crate::common::pass::ModulePass;
 use crate::ir::compose_var_def_dtype;
+use crate::ir::ModulePass;
 use crate::ir::module::{IrGenerator, Registry};
 use crate::ir::types::Dtype;
 use crate::ir::value::GlobalDef;
 use crate::ir::Error;
-
-// ---------------------------------------------------------------------------
-// Plug-in wrapper
-// ---------------------------------------------------------------------------
 
 /// [`ModulePass`] wrapper around [`resolve_return_types`].
 pub(crate) struct ReturnInferPass;
@@ -78,10 +71,6 @@ impl ModulePass for ReturnInferPass {
         resolve_return_types(&mut gen.registry, &gen.input.elements, &gen.module.global_list)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Core data types: Ty, TypeId, UnionFind
-// ---------------------------------------------------------------------------
 
 /// Unique identifier for a type variable.  A small integer; cheap to copy.
 type TypeId = usize;
@@ -97,7 +86,7 @@ enum Ty {
 }
 
 impl Ty {
-    /// Convenience constructor — wraps a `Dtype` as a concrete `Ty`.
+    /// Wrap a `Dtype` as a concrete `Ty`.
     fn concrete(dtype: Dtype) -> Self {
         Self::Concrete(dtype)
     }
@@ -159,8 +148,6 @@ impl UnionFind {
     /// See `docs/asmt-2.md` §3.2 (核心不变式) and §3.3 (工作示例).
     #[allow(unused_variables)]
     fn bind(&mut self, x: TypeId, dtype: Dtype, symbol: &str) -> Result<(), Error> {
-        // TODO(asmt-2 §3.3): Implement `bind`.
-        //
         // Steps:
         //   1. Find the root of x (path compression happens inside `find`).
         //   2. Inspect `self.concrete[root]`:
@@ -169,8 +156,8 @@ impl UnionFind {
         //                              otherwise return `Error::TypeMismatch`
         //                              (expected: existing, actual: dtype).
         //
-        // The core invariant you are maintaining: **every equivalence class
-        // has at most one concrete type**.
+        // Core invariant: every equivalence class has at most one concrete
+        // type.
         todo!("asmt-2 §3.3: UnionFind::bind")
     }
 
@@ -192,8 +179,6 @@ impl UnionFind {
     /// conflict at the end demonstrates the last row in miniature.
     #[allow(unused_variables)]
     fn union(&mut self, a: TypeId, b: TypeId, symbol: &str) -> Result<(), Error> {
-        // TODO(asmt-2 §3.3): Implement `union`.
-        //
         // Steps:
         //   1. Find the two roots `ra`, `rb`. If they coincide, return Ok.
         //   2. Combine `self.concrete[ra]` and `self.concrete[rb]` per the
@@ -211,11 +196,9 @@ impl UnionFind {
     /// yet.  The resolve phase of Pass 2.5 calls this exactly once per
     /// pending function.
     fn resolve(&mut self, x: TypeId) -> Option<Dtype> {
-        // TODO(asmt-2 §3.3): Implement `resolve`.
-        //
-        // Return `self.concrete[find(x)].clone()`.  Make sure to go through
-        // `find` so that path compression is triggered and the answer
-        // reflects all unions performed so far.
+        // Return `self.concrete[find(x)].clone()`.  The result goes
+        // through `find` so that path compression is triggered and the
+        // answer reflects all unions performed so far.
         todo!("asmt-2 §3.3: UnionFind::resolve")
     }
 }
@@ -237,18 +220,12 @@ impl UnionFind {
 /// (usually a variable name, a function name, or `self.fn_name`).
 #[allow(unused_variables)]
 fn unify(uf: &mut UnionFind, a: &Ty, b: &Ty, symbol: &str) -> Result<(), Error> {
-    // TODO(asmt-2 §3.4): Implement the three-way match on `(a, b)`.
-    //
     // For the Concrete/Concrete arm, format the error the same way the
     // UnionFind operations do (`Error::TypeMismatch { symbol, expected,
     // actual }`) so the diagnostic stays consistent regardless of which
     // branch fails.
     todo!("asmt-2 §3.4: unify — three cases")
 }
-
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
 
 /// Run Pass 2.5: resolve every omitted function return type in `elements`
 /// and write the results back into `registry`.
@@ -265,7 +242,7 @@ fn unify(uf: &mut UnionFind, a: &Ty, b: &Ty, symbol: &str) -> Result<(), Error> 
 ///   type but nothing in the program pins it to a concrete type (e.g. a
 ///   function whose body only calls itself).
 /// - [`Error::UnsupportedReturnType`] — inference produced a type other
-///   than `void` or `i32`; the backend does not support those yet.
+///   than `void` or `i32`, which the backend does not lower.
 #[allow(unused_variables)]
 pub(crate) fn resolve_return_types(
     registry: &mut Registry,
@@ -274,16 +251,12 @@ pub(crate) fn resolve_return_types(
 ) -> Result<(), Error> {
     let mut uf = UnionFind::new();
 
-    // -----------------------------------------------------------------------
-    // Phase 1 — Seed (already implemented for you).
-    //
-    // For every FnDef whose declaration has no explicit return type, hand
-    // it a fresh α from the UnionFind and remember the mapping keyed by
-    // the function name.  This phase is pure book-keeping — there is no
-    // algorithmic insight here, so the skeleton fills it in to keep
-    // pre-asmt-2 regression tests (every function has `-> T`) green
-    // without requiring any student code.
-    // -----------------------------------------------------------------------
+    // Phase 1 — Seed.  For every FnDef whose declaration has no explicit
+    // return type, allocate a fresh α from the UnionFind and record the
+    // mapping keyed by the function name.  The skeleton provides this
+    // phase: it is pure book-keeping, and shipping it keeps the existing
+    // regression tests (every function declares `-> T`) green without any
+    // student code.
     let mut pending_returns: HashMap<String, TypeId> = HashMap::new();
     for elem in elements {
         if let ast::ProgramElementInner::FnDef(fn_def) = &elem.inner {
@@ -301,39 +274,34 @@ pub(crate) fn resolve_return_types(
         return Ok(());
     }
 
-    // TODO(asmt-2 §4.3): Phase 2 — Collect.
+    // Phase 2 — Collect.
     //
     //   Walk every FnDef body (both pending *and* non-pending — a
     //   non-pending body may still call pending callees, and those
-    //   call sites contribute constraints we need).  Delegate each
-    //   body to `collect_constraints`, threading the same `uf` and
-    //   `pending_returns` through every call so constraints from one
-    //   body can pin the return type of another.
+    //   call sites contribute constraints the pass needs).  Delegate
+    //   each body to `collect_constraints`, threading the same `uf`
+    //   and `pending_returns` through every call so constraints from
+    //   one body can pin the return type of another.
     //
-    // TODO(asmt-2 §4.3): Phase 3 — Resolve.
+    // Phase 3 — Resolve.
     //
     //   For each `(name, α_f)` in `pending_returns`:
     //     1. `uf.resolve(α_f)` → `Option<Dtype>`.
     //        - `None` means no constraint ever pinned this class.
-    //          Fall back to `Dtype::Void`, matching the pre-asmt-2
-    //          semantics for a body with no `return`.
+    //          Fall back to `Dtype::Void`, matching the baseline
+    //          codegen behaviour for a body with no `return`.
     //     2. Reject anything other than `Void` / `I32` with
     //        `Error::UnsupportedReturnType` (the aarch64 backend does
     //        not lower other types).
     //     3. Overwrite `registry.function_types[name].return_dtype`
-    //        with the resolved type.  Use `Error::FunctionNotDefined`
-    //        if the name somehow isn't in the registry (shouldn't
-    //        happen after Pass 2).
+    //        with the resolved type.  The entry exists after Pass 2;
+    //        a missing name is `Error::FunctionNotDefined`.
     //
     //   Conflicts (e.g. `type_infer_5`: both `return;` and `return t;`
     //   in one body) surface inside `unify` during Phase 2; this
-    //   phase does not need any extra conflict checks.
+    //   phase needs no extra conflict checks.
     todo!("asmt-2 §4.3: collect + resolve")
 }
-
-// ---------------------------------------------------------------------------
-// Constraint collection (per function body)
-// ---------------------------------------------------------------------------
 
 /// Per-function walker that emits unification constraints into the
 /// shared [`UnionFind`].  Operates in the [`Ty`] domain so that
@@ -408,10 +376,6 @@ impl Collector<'_> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Statement dispatch
-    // -----------------------------------------------------------------------
-
     fn process_stmt(&mut self, stmt: &ast::CodeBlockStmt) -> Result<(), Error> {
         match &stmt.inner {
             ast::CodeBlockStmtInner::VarDecl(s) => match &s.inner {
@@ -442,10 +406,6 @@ impl Collector<'_> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Variable declaration (no initialiser)
-    // -----------------------------------------------------------------------
-
     fn process_var_decl(&mut self, decl: &ast::VarDecl) {
         // Untyped scalars are left out of the env: inferring their type
         // is Pass 3's job, and their first assignment will publish a
@@ -467,10 +427,6 @@ impl Collector<'_> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Variable definition (with initialiser)
-    // -----------------------------------------------------------------------
-
     /// Translate `let x[: T] = e;` into an env binding, emitting a
     /// unification constraint when both a declared type and an
     /// initializer are present.
@@ -489,16 +445,13 @@ impl Collector<'_> {
     /// - Element type defaults to `Dtype::I32` when omitted.
     /// - Build the concrete array `Ty` via `compose_var_def_dtype`, call
     ///   `self.check_array_initializer` for side-effects on any pending
-    ///   callees inside the initializer, and drop the array `Ty` into
-    ///   the env.  Arrays never hold a type variable themselves.
+    ///   callees inside the initializer, and store the array `Ty` in the
+    ///   env.  Arrays never hold a type variable themselves.
     #[allow(unused_variables)]
     fn process_var_def(&mut self, def: &ast::VarDef) -> Result<(), Error> {
-        // TODO(asmt-2 §3.4 + §4.3): Implement variable definition.
-        //
-        // See the docstring above for the step-by-step recipe.  The key
-        // educational point is: a declared type on the LHS becomes a
-        // `unify(lhs, rhs)` constraint rather than a direct equality
-        // check, which is the only change from `type_infer.rs`'s R2 rule.
+        // A declared type on the LHS becomes a `unify(lhs, rhs)`
+        // constraint rather than a direct equality check — the only
+        // structural difference from `type_infer.rs`'s R2 rule.
         todo!("asmt-2: process_var_def")
     }
 
@@ -515,10 +468,6 @@ impl Collector<'_> {
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Assignment
-    // -----------------------------------------------------------------------
 
     fn process_assignment(&mut self, stmt: &ast::AssignmentStmt) -> Result<(), Error> {
         let rhs = self.type_of_right_val(&stmt.right_val)?;
@@ -547,10 +496,6 @@ impl Collector<'_> {
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Branching
-    // -----------------------------------------------------------------------
 
     fn process_if(&mut self, stmt: &ast::IfStmt) -> Result<(), Error> {
         self.check_bool_unit(&stmt.bool_unit)?;
@@ -608,7 +553,6 @@ impl Collector<'_> {
         env_a: &HashMap<String, Ty>,
         env_b: &HashMap<String, Ty>,
     ) -> Result<(), Error> {
-        // TODO(asmt-2 §3.4): Implement if/else merge via unify.
         todo!("asmt-2: merge_branches")
     }
 
@@ -623,13 +567,8 @@ impl Collector<'_> {
     /// Mirrors `type_infer.rs::merge_env_single`.
     #[allow(unused_variables)]
     fn merge_with_body(&mut self, branch_env: &HashMap<String, Ty>) -> Result<(), Error> {
-        // TODO(asmt-2 §3.4): Implement while-body merge via unify.
         todo!("asmt-2: merge_with_body")
     }
-
-    // -----------------------------------------------------------------------
-    // Return
-    // -----------------------------------------------------------------------
 
     /// Emit the return-side constraint for one `return` statement.
     ///
@@ -649,13 +588,8 @@ impl Collector<'_> {
     ///   here.
     #[allow(unused_variables)]
     fn process_return(&mut self, stmt: &ast::ReturnStmt) -> Result<(), Error> {
-        // TODO(asmt-2 §4.3): Feed the return expression into α_f.
         todo!("asmt-2: process_return")
     }
-
-    // -----------------------------------------------------------------------
-    // Expression typing
-    // -----------------------------------------------------------------------
 
     fn type_of_right_val(&mut self, val: &ast::RightVal) -> Result<Ty, Error> {
         match &val.inner {
@@ -735,8 +669,6 @@ impl Collector<'_> {
     ///   callees are `Error::FunctionNotDefined`.
     #[allow(unused_variables)]
     fn type_of_fn_call(&mut self, call: &ast::FnCall) -> Result<Ty, Error> {
-        // TODO(asmt-2 §4.3): Return Ty::Var for pending callees,
-        // Ty::Concrete for registered ones.
         todo!("asmt-2: type_of_fn_call")
     }
 
@@ -810,10 +742,8 @@ impl Collector<'_> {
         Ok(element_ty_of_indexing(&arr_ty))
     }
 
-    // -----------------------------------------------------------------------
-    // Boolean expressions (only walked for side-effects on call sites)
-    // -----------------------------------------------------------------------
-
+    // Boolean expressions are only walked for side-effects on call
+    // sites; the operands' own types are Pass 3's concern.
     fn check_bool_expr(&mut self, expr: &ast::BoolExpr) -> Result<(), Error> {
         match &expr.inner {
             ast::BoolExprInner::BoolBiOpExpr(biop) => {
@@ -839,8 +769,8 @@ impl Collector<'_> {
 
 /// Array-decay on indexing: `Array<T, _>` and `Pointer<Array<T, _>>`
 /// yield `T`.  Array positions are always concrete (parameters and
-/// local arrays never hold a type variable), so we only need to match
-/// against `Ty::Concrete`.
+/// local arrays never hold a type variable), so only `Ty::Concrete`
+/// needs matching.
 fn element_ty_of_indexing(ty: &Ty) -> Ty {
     match ty {
         Ty::Concrete(Dtype::Array { element, .. }) => Ty::concrete(element.as_ref().clone()),
